@@ -10837,7 +10837,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             huawei_direct_write=battery_config.get("huawei_direct_write", False),
             huawei_emma_slave_id=battery_config.get("huawei_emma_slave_id"),
             victron_vebus_unit_id=battery_config.get("victron_vebus_unit_id"),
-            victron_battery_unit_id=battery_config.get("victron_battery_unit_id"),
+            victron_system_unit_id=battery_config.get("victron_system_unit_id", 100),
             username=battery_config.get(CONF_USERNAME, ""),
             password=battery_config.get(CONF_PASSWORD, ""),
             battery_manual_mode_enabled=battery_config.get(

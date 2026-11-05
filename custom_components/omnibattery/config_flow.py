@@ -654,7 +654,7 @@ def _victron_connection_schema(battery_num: int) -> vol.Schema:
                 NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)),
                 vol.Coerce(int),
             ),
-            vol.Required("victron_battery_unit_id"): vol.All(
+            vol.Required("victron_system_unit_id", default=100): vol.All(
                 NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)),
                 vol.Coerce(int),
             ),
@@ -1700,10 +1700,10 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             host = user_input[CONF_HOST]
             port = int(user_input.get(CONF_PORT, 502))
             vebus_unit_id = int(user_input["victron_vebus_unit_id"])
-            battery_unit_id = int(user_input["victron_battery_unit_id"])
+            system_unit_id = int(user_input.get("victron_system_unit_id", 100))
             max_charge_power = int(user_input["max_charge_power"])
             max_discharge_power = int(user_input["max_discharge_power"])
-            ok = await VictronEssDriver.probe(host, port, vebus_unit_id, battery_unit_id)
+            ok = await VictronEssDriver.probe(host, port, vebus_unit_id, system_unit_id)
             if not ok:
                 errors["base"] = "cannot_connect"
             else:
@@ -1712,7 +1712,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                     CONF_HOST: host,
                     CONF_PORT: port,
                     "victron_vebus_unit_id": vebus_unit_id,
-                    "victron_battery_unit_id": battery_unit_id,
+                    "victron_system_unit_id": system_unit_id,
                     "max_charge_power": max_charge_power,
                     "max_discharge_power": max_discharge_power,
                     "brand": "victron",
@@ -4825,10 +4825,10 @@ class OptionsFlowHandler(OptionsFlow):
                 host = user_input[CONF_HOST]
                 port = int(user_input.get(CONF_PORT, 502))
                 vebus_unit_id = int(user_input["victron_vebus_unit_id"])
-                battery_unit_id = int(user_input["victron_battery_unit_id"])
+                system_unit_id = int(user_input.get("victron_system_unit_id", 100))
                 max_charge_power = int(user_input["max_charge_power"])
                 max_discharge_power = int(user_input["max_discharge_power"])
-                ok = await VictronEssDriver.probe(host, port, vebus_unit_id, battery_unit_id)
+                ok = await VictronEssDriver.probe(host, port, vebus_unit_id, system_unit_id)
                 if not ok:
                     errors["base"] = "cannot_connect"
                 else:
@@ -4837,7 +4837,7 @@ class OptionsFlowHandler(OptionsFlow):
                         CONF_HOST: host,
                         CONF_PORT: port,
                         "victron_vebus_unit_id": vebus_unit_id,
-                        "victron_battery_unit_id": battery_unit_id,
+                        "victron_system_unit_id": system_unit_id,
                         "max_charge_power": max_charge_power,
                         "max_discharge_power": max_discharge_power,
                         "brand": "victron",
@@ -4851,7 +4851,7 @@ class OptionsFlowHandler(OptionsFlow):
                     CONF_HOST: current_battery.get(CONF_HOST, ""),
                     CONF_PORT: current_battery.get(CONF_PORT, 502),
                     "victron_vebus_unit_id": current_battery.get("victron_vebus_unit_id", 0),
-                    "victron_battery_unit_id": current_battery.get("victron_battery_unit_id", 0),
+                    "victron_system_unit_id": current_battery.get("victron_system_unit_id", 100),
                     "max_charge_power": current_battery.get("max_charge_power", 5000),
                     "max_discharge_power": current_battery.get("max_discharge_power", 5000),
                 }
@@ -4861,7 +4861,7 @@ class OptionsFlowHandler(OptionsFlow):
                     CONF_HOST: "",
                     CONF_PORT: 502,
                     "victron_vebus_unit_id": 0,
-                    "victron_battery_unit_id": 0,
+                    "victron_system_unit_id": 100,
                     "max_charge_power": 5000,
                     "max_discharge_power": 5000,
                 }
@@ -4878,7 +4878,7 @@ class OptionsFlowHandler(OptionsFlow):
                     vol.Optional(CONF_PORT, default=defaults[CONF_PORT]): int,
                     vol.Required("victron_vebus_unit_id", default=defaults["victron_vebus_unit_id"]):
                         vol.All(NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
-                    vol.Required("victron_battery_unit_id", default=defaults["victron_battery_unit_id"]):
+                    vol.Required("victron_system_unit_id", default=defaults["victron_system_unit_id"]):
                         vol.All(NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
                     vol.Required("max_charge_power", default=defaults["max_charge_power"]): NumberSelector(
                         NumberSelectorConfig(min=100, max=_VICTRON_MAX_POWER_W, step=50, unit_of_measurement="W", mode=NumberSelectorMode.BOX)

@@ -29,12 +29,17 @@ for the full writeup; the short version:
   41 for L1/L2/L3). This driver writes L1 only — single-phase installations
   only, for now.
 
-Telemetry is the weaker half of this driver. The battery SOC/power register
-offsets below are **not yet confirmed on hardware** — they come from
-community references to Victron's "CCGX Modbus-TCP register list"
-spreadsheet. Cross-check them against the official Victron GX HA integration
-(already installed, per the design discussion) before relying on the values
-this driver publishes.
+Telemetry comes from ``com.victronenergy.system`` (unit id 100, Victron's own
+documented default for the system aggregate), not from a per-battery
+``com.victronenergy.battery`` service. That is deliberate, not a fallback: a
+GX device always exposes the system aggregate, while whether a separate
+per-battery Modbus service exists at all depends on the BMS and how Venus OS
+enumerates it — DVCC sees a CAN-bus battery regardless, but the Modbus-TCP
+bridge does not necessarily forward it as its own service. Registers 842
+(``Dc/Battery/Power``, int16, W, +charge/-discharge) and 843 (``Dc/Battery/
+Soc``, uint16, 0-100%) were confirmed against a real installation's register
+map during review — not merely a secondhand reference — which is why this
+is the primary telemetry path rather than a documented fallback.
 """
 
 from __future__ import annotations
@@ -67,14 +72,12 @@ _REG_VEBUS_AC_POWER_SETPOINT_L3 = 41   # int16, W (L3, three-phase only — not 
 _REG_VEBUS_DISABLE_CHARGE = 38         # uint16, 0/1 (Hub4/DisableCharge)
 _REG_VEBUS_DISABLE_FEEDIN = 39         # uint16, 0/1 (Hub4/DisabledFeedIn)
 
-# --- com.victronenergy.battery -----------------------------------------------
-# UNVERIFIED — community references to the CCGX Modbus-TCP register list, not
-# a hardware read. Confirm against the real spreadsheet for your Venus OS
-# version, or against the official Victron GX HA integration's SOC/power
-# entities, before trusting these.
-_REG_BATTERY_SOC = 266     # uint16, x0.1 -> %
-_REG_BATTERY_POWER = 260   # int16, W, +charge/-discharge (Victron's own DC sign convention,
-                            # already the Omnibattery convention — no flip expected, unconfirmed)
+# --- com.victronenergy.system, unit id 100 (Victron's documented default) --
+# CONFIRMED against a real installation's register map, not a secondhand
+# reference. This is the system-wide DC battery aggregate, read regardless of
+# whether this specific battery also answers as its own Modbus service.
+_REG_SYSTEM_BATTERY_POWER = 842  # int16, W, +charge/-discharge, no scaling
+_REG_SYSTEM_BATTERY_SOC = 843    # uint16, 0-100%, no scaling
 
 # Hard-coded by the Multi's own regulation, not configurable. CONFIRMED
 # against the same ESS Mode 2/3 documentation as the setpoint register.
@@ -129,7 +132,7 @@ class VictronEssDriver(BatteryDriver):
         port: int = 502,
         *,
         vebus_unit_id: int,
-        battery_unit_id: int,
+        system_unit_id: int = 100,
         max_charge_power_w: int,
         max_discharge_power_w: int,
         client: Optional[VictronModbusClient] = None,
@@ -137,7 +140,7 @@ class VictronEssDriver(BatteryDriver):
         self.host = host
         self.port = port
         self._vebus_unit_id = int(vebus_unit_id)
-        self._battery_unit_id = int(battery_unit_id)
+        self._system_unit_id = int(system_unit_id)
         self._client = client if client is not None else VictronModbusClient(host, port)
         self._shutting_down = False
         # Last value actually written, so net_power_from_data has something to
@@ -222,21 +225,22 @@ class VictronEssDriver(BatteryDriver):
 
         if requested is None or {"battery_soc", "battery_power"} & requested:
             regs = await self._client.async_read_holding_block(
-                self._battery_unit_id, _REG_BATTERY_SOC, 1
+                self._system_unit_id, _REG_SYSTEM_BATTERY_SOC, 1
             )
             if regs is not None:
-                soc = round(decode_u16(regs, 0) * 0.1, 1)
+                soc = decode_u16(regs, 0)
                 if 0 <= soc <= 100:
                     snapshot["battery_soc"] = soc
                 else:
                     _LOGGER.warning(
                         "Victron driver: dropping battery_soc=%s — outside 0-100%%. "
-                        "The register offset may be wrong for this install; see "
+                        "Confirm the system unit id (default 100) is correct for "
+                        "this GX device; see "
                         "docs/research/victron/driver-assessment-victron.md",
                         soc,
                     )
             regs = await self._client.async_read_holding_block(
-                self._battery_unit_id, _REG_BATTERY_POWER, 1
+                self._system_unit_id, _REG_SYSTEM_BATTERY_POWER, 1
             )
             if regs is not None:
                 snapshot["battery_power"] = decode_i16(regs, 0)
@@ -404,7 +408,7 @@ class VictronEssDriver(BatteryDriver):
 
     @classmethod
     async def probe(
-        cls, host: str, port: int, vebus_unit_id: int, battery_unit_id: int
+        cls, host: str, port: int, vebus_unit_id: int, system_unit_id: int = 100
     ) -> bool:
         """Best-effort connectivity check for the config flow.
 
@@ -419,9 +423,9 @@ class VictronEssDriver(BatteryDriver):
             vebus_regs = await client.async_read_holding_block(
                 int(vebus_unit_id), _REG_VEBUS_AC_POWER_SETPOINT_L1, 1
             )
-            battery_regs = await client.async_read_holding_block(
-                int(battery_unit_id), _REG_BATTERY_SOC, 1
+            system_regs = await client.async_read_holding_block(
+                int(system_unit_id), _REG_SYSTEM_BATTERY_SOC, 1
             )
-            return vebus_regs is not None and battery_regs is not None
+            return vebus_regs is not None and system_regs is not None
         finally:
             await client.async_close()

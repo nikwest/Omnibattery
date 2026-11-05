@@ -13,8 +13,8 @@ import pytest
 
 from custom_components.omnibattery.drivers import DriverCapabilities, VictronEssDriver
 from custom_components.omnibattery.drivers.victron import (
-    _REG_BATTERY_POWER,
-    _REG_BATTERY_SOC,
+    _REG_SYSTEM_BATTERY_POWER,
+    _REG_SYSTEM_BATTERY_SOC,
     _REG_VEBUS_AC_POWER_SETPOINT_L1,
     _REG_VEBUS_DISABLE_CHARGE,
 )
@@ -38,7 +38,7 @@ def _fake_client():
 
 def _driver(client=None, **kw):
     kw.setdefault("vebus_unit_id", 227)
-    kw.setdefault("battery_unit_id", 1)
+    kw.setdefault("system_unit_id", 100)
     kw.setdefault("max_charge_power_w", 5000)
     kw.setdefault("max_discharge_power_w", 5000)
     return VictronEssDriver("1.2.3.4", 502, client=client or _fake_client(), **kw)
@@ -112,9 +112,9 @@ async def test_read_telemetry_decodes_soc_and_power():
     client = _fake_client()
 
     async def fake_read(unit_id, start, count):
-        if unit_id == 1 and start == _REG_BATTERY_SOC:
-            return [650]  # 65.0%
-        if unit_id == 1 and start == _REG_BATTERY_POWER:
+        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_SOC:
+            return [65]  # 65%, no scaling on this register
+        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_POWER:
             return [encode_i16(-320)]  # discharging 320W
         return None
 
@@ -122,7 +122,7 @@ async def test_read_telemetry_decodes_soc_and_power():
     driver = _driver(client=client)
 
     data = await driver.read_telemetry(["battery_soc", "battery_power"])
-    assert data["battery_soc"] == 65.0
+    assert data["battery_soc"] == 65
     assert data["battery_power"] == -320
 
 
@@ -130,7 +130,7 @@ async def test_read_telemetry_decodes_soc_and_power():
 async def test_read_telemetry_rejects_out_of_range_soc():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [0xFFFF] if start == _REG_BATTERY_SOC else None
+        side_effect=lambda unit_id, start, count: [0xFFFF] if start == _REG_SYSTEM_BATTERY_SOC else None
     )
     driver = _driver(client=client)
 
@@ -303,12 +303,12 @@ async def test_probe_requires_both_unit_ids_to_answer(monkeypatch):
     fake.async_read_holding_block = AsyncMock(return_value=[1])
     monkeypatch.setattr(victron_mod, "VictronModbusClient", lambda *a, **k: fake)
 
-    assert await VictronEssDriver.probe("1.2.3.4", 502, 227, 1) is True
+    assert await VictronEssDriver.probe("1.2.3.4", 502, 227, 100) is True
 
     fake_fail = _fake_client()
     fake_fail.async_read_holding_block = AsyncMock(return_value=None)
     monkeypatch.setattr(victron_mod, "VictronModbusClient", lambda *a, **k: fake_fail)
-    assert await VictronEssDriver.probe("1.2.3.4", 502, 227, 1) is False
+    assert await VictronEssDriver.probe("1.2.3.4", 502, 227, 100) is False
 
 
 # ----------------------------------------------------------------------

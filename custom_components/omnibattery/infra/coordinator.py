@@ -328,7 +328,7 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                  huawei_direct_write: bool = False,
                  huawei_emma_slave_id: int | None = None,
                  victron_vebus_unit_id: int | None = None,
-                 victron_battery_unit_id: int | None = None,
+                 victron_system_unit_id: int = 100,
                  username: str = "",
                  password: str = "",
                  battery_manual_mode_enabled: bool = False,
@@ -562,12 +562,12 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
             # communicating battery are two different unit ids on that one
             # Modbus-TCP connection, not two different hosts.
             self.victron_vebus_unit_id = victron_vebus_unit_id
-            self.victron_battery_unit_id = victron_battery_unit_id
+            self.victron_system_unit_id = victron_system_unit_id
             self.driver = VictronEssDriver(
                 self.host,
                 self.port,
                 vebus_unit_id=victron_vebus_unit_id,
-                battery_unit_id=victron_battery_unit_id,
+                system_unit_id=victron_system_unit_id,
                 max_charge_power_w=self.configured_max_charge_power,
                 max_discharge_power_w=self.configured_max_discharge_power,
             )
