@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
@@ -346,3 +347,72 @@ async def test_reconnect_records_failed_rs485_reenable():
 
     assert result is True
     assert coordinator._last_rs485_reenable_success is False
+
+
+# === _maybe_refresh_setpoint (Victron ESS watchdog keepalive) ===
+#
+# Runs from the coordinator's own poll cycle, not the fleet controller: a
+# battery sitting inside the PD deadband or blocked can go un-visited by
+# _set_battery_power for far longer than Victron's 60s AcPowerSetpoint
+# watchdog allows, so the rewrite must not depend on the fleet calling in.
+
+
+async def test_setpoint_refresh_skips_without_the_capability():
+    """Every driver except Victron leaves setpoint_refresh_interval_s None."""
+    coordinator = SimpleNamespace(
+        capabilities=SimpleNamespace(setpoint_refresh_interval_s=None),
+        _is_shutting_down=False,
+        is_available=True,
+        apply_power=AsyncMock(),
+    )
+
+    await MarstekVenusDataUpdateCoordinator._maybe_refresh_setpoint(coordinator)
+
+    coordinator.apply_power.assert_not_called()
+
+
+async def test_setpoint_refresh_skips_before_the_interval_elapses():
+    coordinator = SimpleNamespace(
+        capabilities=SimpleNamespace(setpoint_refresh_interval_s=45.0),
+        _is_shutting_down=False,
+        is_available=True,
+        _setpoint_refresh_monotonic=time.monotonic(),
+        apply_power=AsyncMock(),
+    )
+
+    await MarstekVenusDataUpdateCoordinator._maybe_refresh_setpoint(coordinator)
+
+    coordinator.apply_power.assert_not_called()
+
+
+async def test_setpoint_refresh_rewrites_the_last_commanded_net_power():
+    coordinator = SimpleNamespace(
+        capabilities=SimpleNamespace(setpoint_refresh_interval_s=45.0),
+        _is_shutting_down=False,
+        is_available=True,
+        _setpoint_refresh_monotonic=0.0,
+        commanded_charge_power=0,
+        commanded_discharge_power=250,
+        apply_power=AsyncMock(),
+    )
+
+    await MarstekVenusDataUpdateCoordinator._maybe_refresh_setpoint(coordinator)
+
+    coordinator.apply_power.assert_awaited_once_with(-250, read_back=False)
+
+
+async def test_setpoint_refresh_skips_while_shutting_down_or_unavailable():
+    for is_shutting_down, is_available in ((True, True), (False, False)):
+        coordinator = SimpleNamespace(
+            capabilities=SimpleNamespace(setpoint_refresh_interval_s=45.0),
+            _is_shutting_down=is_shutting_down,
+            is_available=is_available,
+            _setpoint_refresh_monotonic=0.0,
+            commanded_charge_power=0,
+            commanded_discharge_power=0,
+            apply_power=AsyncMock(),
+        )
+
+        await MarstekVenusDataUpdateCoordinator._maybe_refresh_setpoint(coordinator)
+
+        coordinator.apply_power.assert_not_called()

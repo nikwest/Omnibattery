@@ -1689,7 +1689,35 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                 updated_data,
             )
 
+        maybe_refresh_setpoint = getattr(self, "_maybe_refresh_setpoint", None)
+        if maybe_refresh_setpoint is not None:
+            await maybe_refresh_setpoint()
+
         return self.data
+
+    async def _maybe_refresh_setpoint(self) -> None:
+        """Rewrite the last commanded setpoint if the driver needs a watchdog kick.
+
+        Only a driver declaring ``setpoint_refresh_interval_s`` (Victron's ESS
+        external control: AcPowerSetpoint reverts the Multi to passthrough if
+        unwritten for 60s) reaches past the first check. This runs from the
+        coordinator's own poll cycle rather than the fleet controller's
+        ``_set_battery_power`` so it fires on this coordinator's own interval
+        (1.5s) regardless of fleet-level control flow — a battery sitting
+        inside the PD deadband, or blocked, can otherwise go un-visited by the
+        controller for far longer than the hardware watchdog allows.
+        """
+        refresh_interval_s = getattr(
+            self.capabilities, "setpoint_refresh_interval_s", None
+        )
+        if refresh_interval_s is None or self._is_shutting_down or not self.is_available:
+            return
+        last_refresh = getattr(self, "_setpoint_refresh_monotonic", 0.0)
+        if time.monotonic() - last_refresh < refresh_interval_s:
+            return
+        self._setpoint_refresh_monotonic = time.monotonic()
+        net_power = self.commanded_charge_power - self.commanded_discharge_power
+        await self.apply_power(net_power, read_back=False)
 
     def _update_backup_discharge_energy(self, updated_data: dict) -> None:
         """Integrate driver-declared discharge omitted by a hardware counter."""
