@@ -1942,6 +1942,12 @@
       "ac_power_setpoint": {
         "name": "ESS AC Power Setpoint"
       },
+      "ac_consumption": {
+        "name": "AC Consumption"
+      },
+      "ess_control_mode": {
+        "name": "ESS Control Mode"
+      },
       "charging_cutoff_capacity": {
         "name": "Charging Cutoff"
       },

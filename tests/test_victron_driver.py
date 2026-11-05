@@ -13,6 +13,9 @@ import pytest
 
 from custom_components.omnibattery.drivers import DriverCapabilities, VictronEssDriver
 from custom_components.omnibattery.drivers.victron import (
+    _HUB4_MODE_EXTERNAL_CONTROL,
+    _REG_SETTINGS_HUB4_MODE,
+    _REG_SYSTEM_AC_CONSUMPTION_L1,
     _REG_SYSTEM_BATTERY_POWER,
     _REG_SYSTEM_BATTERY_SOC,
     _REG_VEBUS_AC_POWER_SETPOINT_L1,
@@ -36,12 +39,24 @@ def _fake_client():
     return client
 
 
-def _driver(client=None, **kw):
+def _driver(client=None, consumption=0, ess_mode_external=None, **kw):
+    """Build a driver with sane defaults for the control-path tests.
+
+    ``consumption=0`` makes the AC-consumption compensation a no-op by
+    default, so tests that don't care about it see the same numbers the
+    pre-compensation code produced. Tests that do care pass a real value.
+    ``ess_mode_external=None`` (unknown) is the default the driver starts
+    with before any telemetry poll; pass True/False to simulate a confirmed
+    read.
+    """
     kw.setdefault("vebus_unit_id", 227)
     kw.setdefault("system_unit_id", 100)
     kw.setdefault("max_charge_power_w", 5000)
     kw.setdefault("max_discharge_power_w", 5000)
-    return VictronEssDriver("1.2.3.4", 502, client=client or _fake_client(), **kw)
+    driver = VictronEssDriver("1.2.3.4", 502, client=client or _fake_client(), **kw)
+    driver._ac_consumption_w = consumption
+    driver._ess_mode_confirmed_external = ess_mode_external
+    return driver
 
 
 # ----------------------------------------------------------------------
@@ -149,6 +164,8 @@ async def test_read_telemetry_omits_keys_on_failed_block():
     assert "battery_soc" not in data
     assert "battery_power" not in data
     assert "ac_power_setpoint" not in data
+    assert "ac_consumption" not in data
+    assert "ess_control_mode" not in data
 
 
 @pytest.mark.asyncio
@@ -164,15 +181,54 @@ async def test_read_telemetry_disable_flags():
     assert data["disable_feedin"] == 0
 
 
+@pytest.mark.asyncio
+async def test_read_telemetry_tracks_ac_consumption_for_apply_setpoint():
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: [1800] if start == _REG_SYSTEM_AC_CONSUMPTION_L1 else None
+    )
+    driver = _driver(client=client, consumption=None)
+
+    data = await driver.read_telemetry(["ac_consumption"])
+    assert data["ac_consumption"] == 1800
+    assert driver._ac_consumption_w == 1800
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_reports_ess_control_mode():
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE else None
+    )
+    driver = _driver(client=client)
+
+    data = await driver.read_telemetry(["ess_control_mode"])
+    assert data["ess_control_mode"] == "External control"
+    assert driver._ess_mode_confirmed_external is True
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_flags_non_external_ess_mode():
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: [1] if start == _REG_SETTINGS_HUB4_MODE else None
+    )
+    driver = _driver(client=client)
+
+    data = await driver.read_telemetry(["ess_control_mode"])
+    assert data["ess_control_mode"] == "Not external control (mode 1)"
+    assert driver._ess_mode_confirmed_external is False
+
+
 # ----------------------------------------------------------------------
-# control
+# control: the AC-consumption compensation (the correctness bug fix)
 # ----------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_apply_setpoint_writes_and_confirms():
+async def test_apply_setpoint_writes_and_confirms_with_zero_consumption():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(return_value=[encode_i16(1200)])
-    driver = _driver(client=client)
+    driver = _driver(client=client, consumption=0)
 
     result = await driver.apply_setpoint(1200)
 
@@ -182,12 +238,126 @@ async def test_apply_setpoint_writes_and_confirms():
     assert result.ok is True
     assert result.net_power_w == 1200
     assert result.confirmed is True
-    assert result.applied == {"ac_power_setpoint": 1200}
+    assert result.applied == {"ac_power_setpoint": 1200, "battery_setpoint_w": 1200}
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_adds_ac_consumption_to_the_register_write():
+    """The bug the review caught: writing the battery figure straight into
+    the grid-point register asks for the opposite of what was intended
+    whenever house load is nonzero. A 500W charge intent with a 2000W house
+    load must write 2500 (500 + 2000), not 500."""
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(2500)])
+    driver = _driver(client=client, consumption=2000)
+
+    result = await driver.apply_setpoint(500)
+
+    client.async_write_registers.assert_awaited_once_with(
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(2500)]
+    )
+    assert result.net_power_w == 500  # the battery intent, unchanged
+    assert result.applied["ac_power_setpoint"] == 2500  # the compensated register value
+    assert result.applied["battery_setpoint_w"] == 500
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_discharge_with_consumption():
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(1500)])
+    driver = _driver(client=client, consumption=2000)
+
+    result = await driver.apply_setpoint(-500)
+
+    client.async_write_registers.assert_awaited_once_with(
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(1500)]
+    )
+    assert result.net_power_w == -500
+    assert result.applied["ac_power_setpoint"] == 1500
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_zero_means_battery_idle_not_zero_grid_flow():
+    """With the fix, a 0W intent against a 2000W house load writes 2000 to
+    the register (import exactly matches consumption, battery untouched) —
+    not 0 (which would have demanded a 2000W discharge from a battery the
+    caller asked to leave alone)."""
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(2000)])
+    driver = _driver(client=client, consumption=2000)
+
+    result = await driver.apply_setpoint(0)
+
+    client.async_write_registers.assert_awaited_once_with(
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(2000)]
+    )
+    assert result.net_power_w == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_refuses_when_consumption_unknown():
+    client = _fake_client()
+    driver = _driver(client=client, consumption=None)
+
+    result = await driver.apply_setpoint(500)
+
+    client.async_write_registers.assert_not_awaited()
+    assert result.ok is False
+    assert result.failure_reason == "consumption_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_refuses_when_ess_mode_confirmed_not_external():
+    client = _fake_client()
+    driver = _driver(client=client, consumption=0, ess_mode_external=False)
+
+    result = await driver.apply_setpoint(500)
+
+    client.async_write_registers.assert_not_awaited()
+    assert result.ok is False
+    assert result.failure_reason == "ess_mode_not_external"
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_proceeds_when_ess_mode_unconfirmed():
+    """None (couldn't check — e.g. settings service not forwarded) must not
+    block writes the way a confirmed False does."""
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(500)])
+    driver = _driver(client=client, consumption=0, ess_mode_external=None)
+
+    result = await driver.apply_setpoint(500)
+
+    client.async_write_registers.assert_awaited_once()
+    assert result.ok is True
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_reports_actual_battery_power_separately_from_the_echo():
+    """'Confirmed' only means the setpoint register echoed back — it does not
+    mean the Multi achieved that power. battery_power_w must come from a real
+    reading of the system aggregate, not be assumed equal to the command."""
+    client = _fake_client()
+
+    async def fake_read(unit_id, start, count):
+        if unit_id == 227 and start == _REG_VEBUS_AC_POWER_SETPOINT_L1:
+            return [encode_i16(1200)]  # the setpoint echo
+        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_POWER:
+            return [encode_i16(300)]  # what the Multi actually achieved so far
+        return None
+
+    client.async_read_holding_block = AsyncMock(side_effect=fake_read)
+    driver = _driver(client=client, consumption=0)
+
+    result = await driver.apply_setpoint(1200)
+
+    assert result.confirmed is True        # the register took the write
+    assert result.battery_power_w == 300   # but delivery is still ramping
 
 
 @pytest.mark.asyncio
 async def test_apply_setpoint_clamps_to_envelope():
-    driver = _driver(max_charge_power_w=2000, max_discharge_power_w=1500)
+    driver = _driver(max_charge_power_w=2000, max_discharge_power_w=1500, consumption=0)
     driver._client.async_read_holding_block = AsyncMock(return_value=[encode_i16(2000)])
 
     over_charge = await driver.apply_setpoint(9000)
@@ -201,7 +371,7 @@ async def test_apply_setpoint_clamps_to_envelope():
 async def test_apply_setpoint_write_failure_is_reported():
     client = _fake_client()
     client.async_write_registers = AsyncMock(return_value=False)
-    driver = _driver(client=client)
+    driver = _driver(client=client, consumption=0)
 
     result = await driver.apply_setpoint(500)
     assert result.ok is False
@@ -211,30 +381,34 @@ async def test_apply_setpoint_write_failure_is_reported():
 @pytest.mark.asyncio
 async def test_apply_setpoint_skips_readback_when_not_requested():
     client = _fake_client()
-    driver = _driver(client=client)
+    driver = _driver(client=client, consumption=0)
 
     result = await driver.apply_setpoint(500, read_back=False)
     client.async_read_holding_block.assert_not_awaited()
     assert result.ok is True
     assert result.confirmed is False
-    assert result.applied == {"ac_power_setpoint": 500}
+    assert result.applied == {"ac_power_setpoint": 500, "battery_setpoint_w": 500}
 
 
 @pytest.mark.asyncio
 async def test_apply_setpoint_unconfirmed_when_readback_fails():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(return_value=None)
-    driver = _driver(client=client)
+    driver = _driver(client=client, consumption=0)
 
     result = await driver.apply_setpoint(500)
     assert result.ok is True
     assert result.confirmed is False
+    assert result.battery_power_w is None
 
 
 def test_net_power_from_data():
     driver = _driver()
     assert driver.net_power_from_data({}) is None
-    assert driver.net_power_from_data({"ac_power_setpoint": -400}) == -400
+    assert driver.net_power_from_data({"battery_setpoint_w": -400}) == -400
+    # The raw register alone (without the companion key) must not be
+    # mistaken for the battery intent — that was the bug.
+    assert driver.net_power_from_data({"ac_power_setpoint": -400}) is None
 
 
 @pytest.mark.asyncio
@@ -317,14 +491,20 @@ async def test_probe_requires_both_unit_ids_to_answer(monkeypatch):
 
 def test_control_dependency_keys():
     keys = _driver().control_dependency_keys
-    assert {"battery_soc", "battery_power", "ac_power_setpoint"} <= keys
+    assert {
+        "battery_soc", "battery_power", "ac_power_setpoint",
+        "ac_consumption", "ess_control_mode",
+    } <= keys
 
 
 def test_entity_definitions_expose_expected_keys():
     driver = _driver()
     sensor_keys = {d["key"] for d in driver.sensor_definitions}
     switch_keys = {d["key"] for d in driver.switch_definitions}
-    assert {"battery_soc", "battery_power", "ac_power_setpoint"} <= sensor_keys
+    assert {
+        "battery_soc", "battery_power", "ac_power_setpoint",
+        "ac_consumption", "ess_control_mode",
+    } <= sensor_keys
     assert {"disable_charge", "disable_feedin"} == switch_keys
     assert driver.number_definitions == []
     assert driver.all_definitions == (

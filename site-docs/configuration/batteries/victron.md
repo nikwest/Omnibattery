@@ -2,8 +2,10 @@
 
 Omnibattery drives a Victron Multiplus or Quattro behind a GX device (Cerbo GX, Venus GX, or Venus OS) through ESS **external control** (Hub-4 Mode 3): it writes the AC power setpoint directly over Modbus TCP instead of relying on the GX device's own self-consumption loop.
 
-!!! warning "Experimental — control path confirmed, telemetry path partially confirmed"
-    This route was built from Victron's own ESS external-control documentation. The control registers (`AcPowerSetpoint`, `DisableCharge`, `DisabledFeedIn`) are confirmed against Victron's own documentation. Battery SOC and power are read from the **system aggregate** service (unit id 100, registers 843/842) rather than a separate per-battery service — this was corrected against a real installation's register map, since the installation's Modbus-TCP bridge did not expose a separate communicating-battery service, and an earlier register guess for battery power was wrong (it pointed at starter-battery voltage, not the house battery's power). The sign of the control command is still reasoned from topology, not measured — verify it on your own installation (a small +200 W / -200 W step, watched against your grid sensor) before leaving it unattended.
+!!! warning "Experimental — still pending a live-hardware test"
+    The control and telemetry registers are confirmed against Victron's own documentation and a real installation's register map, and a control-mapping bug (the setpoint register targets the Multi's AC-input, not the battery, so house load has to be compensated for — see "What you will see" below) was caught and fixed in review before any hardware test. What remains unverified is whether all of this behaves correctly together on a live Multi. Start with manual, low-power commands (e.g. +200 W, then -200 W) with the battery otherwise idle, and confirm the grid sensor and battery power move the way you expect before enabling automatic control.
+
+    One behavioural note worth knowing before you start: switching **Settings → ESS → Mode** to **External control** disables Victron's **BatteryLife** feature for as long as external control is active — this is Victron's own documented design, not something Omnibattery does.
 
 ## Do I need it?
 
@@ -15,7 +17,7 @@ Omnibattery drives a Victron Multiplus or Quattro behind a GX device (Cerbo GX, 
 |---|---|---|---|
 | Multiplus/Quattro behind a GX device | Modbus TCP to the GX device (not the Multi directly) | Yes, via ESS external control | Single-phase only; the AC power setpoint must be rewritten at least once every 60 s or the Multi reverts to passthrough — Omnibattery does this automatically. |
 
-Omnibattery reads battery SOC and power from the system aggregate, and the ESS AC power setpoint readback. It writes the setpoint and, optionally, the `DisableCharge`/`DisabledFeedIn` safety switches.
+Omnibattery reads battery SOC and power from the system aggregate, the current AC consumption (house load), and the ESS AC power setpoint readback. The AC consumption reading matters for correctness, not just display: the setpoint register controls power at the Multi's AC-input, not the battery, so every write adds the current house load to the requested battery power before sending it — without that compensation, a "charge" command could discharge the battery instead whenever there's a load on the output. Omnibattery writes the setpoint and, optionally, the `DisableCharge`/`DisabledFeedIn` safety switches.
 
 ## Before you start
 
@@ -35,9 +37,11 @@ The wizard confirms both unit ids answer over Modbus; it cannot confirm the regi
 
 ## What you will see
 
-You will see automatic battery control and the shared manual power controls, plus **ESS Disable Charge** and **ESS Disable Feed-in** switches and an **ESS AC Power Setpoint** diagnostic sensor.
+You will see automatic battery control and the shared manual power controls, plus **ESS Disable Charge** and **ESS Disable Feed-in** switches, an **ESS AC Power Setpoint** sensor (the raw grid-point register, after house-load compensation — not the battery power), and two more diagnostic sensors: **AC Consumption** (the house-load reading the compensation uses) and **ESS Control Mode** (reports "External control" when it can confirm the GX device agrees, where the GX device's settings service is reachable over Modbus-TCP at all — not every configuration forwards it).
 
-A zero command is not an idle/off state — it asks the Multi to balance to zero grid flow, which is an active command, not a release. Stopping Omnibattery (or losing the connection) releases control after at most 60 seconds, when the Multi's own watchdog reverts it to passthrough; there is currently no confirmed way to restore the GX device's own ESS mode immediately.
+A zero command means the battery is left alone (import is set to match consumption exactly). Stopping Omnibattery (or losing the connection) releases control after at most 60 seconds, when the Multi's own watchdog reverts it to passthrough; there is currently no confirmed way to restore the GX device's own ESS mode immediately, and BatteryLife stays disabled until you switch ESS Mode back yourself.
+
+If the AC Consumption reading is unavailable (no successful read yet, or the register failed), Omnibattery refuses to write a setpoint rather than send an uncompensated value — better to do nothing than repeat the compensation bug described above. The same applies if **ESS Control Mode** positively confirms the GX device is *not* in External control.
 
 Cell-balance monitoring, voltage taper, and MPPT solar telemetry are not available for this route.
 
@@ -45,5 +49,6 @@ Cell-balance monitoring, voltage taper, and MPPT solar telemetry are not availab
 
 - Confirm Modbus/TCP is enabled on the GX device and reachable from Home Assistant.
 - Re-check the vebus unit id under **Settings → Services → Modbus/TCP → Available services** — it can differ from what another tool or guide assumed. If your GX device's system aggregate does not answer on unit id 100, re-check that value too.
-- Confirm **Settings → ESS → Mode** is still **External control**; anything else means the GX device's own loop is driving the Multi, not Omnibattery.
+- Confirm **Settings → ESS → Mode** is still **External control**; anything else means the GX device's own loop is driving the Multi, not Omnibattery. The **ESS Control Mode** sensor confirms this when it can — if it's missing entirely, your GX device likely doesn't forward the settings service over Modbus-TCP, and you'll need to check manually on the device itself.
+- If nothing is being commanded at all, check the **AC Consumption** sensor — a missing or stale reading there blocks every write by design.
 - If the battery SOC or power reading looks wrong, compare against the official Victron GX Home Assistant integration's own sensors for the same battery, if installed.
