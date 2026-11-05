@@ -13,13 +13,13 @@ import pytest
 
 from custom_components.omnibattery.drivers import DriverCapabilities, VictronEssDriver
 from custom_components.omnibattery.drivers.victron import (
-    _HUB4_MODE_EXTERNAL_CONTROL,
-    _REG_SETTINGS_HUB4_MODE,
     _REG_SYSTEM_AC_CONSUMPTION_L1,
     _REG_SYSTEM_BATTERY_POWER,
     _REG_SYSTEM_BATTERY_SOC,
+    _REG_SYSTEM_STATE,
     _REG_VEBUS_AC_POWER_SETPOINT_L1,
     _REG_VEBUS_DISABLE_CHARGE,
+    _SYSTEM_STATE_EXTERNAL_CONTROL,
 )
 from custom_components.omnibattery.infra.victron_modbus_client import (
     decode_i16,
@@ -198,7 +198,7 @@ async def test_read_telemetry_tracks_ac_consumption_for_apply_setpoint():
 async def test_read_telemetry_reports_ess_control_mode():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE else None
+        side_effect=lambda unit_id, start, count: [_SYSTEM_STATE_EXTERNAL_CONTROL] if start == _REG_SYSTEM_STATE else None
     )
     driver = _driver(client=client)
 
@@ -211,13 +211,25 @@ async def test_read_telemetry_reports_ess_control_mode():
 async def test_read_telemetry_flags_non_external_ess_mode():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [1] if start == _REG_SETTINGS_HUB4_MODE else None
+        side_effect=lambda unit_id, start, count: [8] if start == _REG_SYSTEM_STATE else None  # Passthru
     )
     driver = _driver(client=client)
 
     data = await driver.read_telemetry(["ess_control_mode"])
-    assert data["ess_control_mode"] == "Not external control (mode 1)"
+    assert data["ess_control_mode"] == "Passthru"
     assert driver._ess_mode_confirmed_external is False
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_labels_unmapped_state_by_number():
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: [3] if start == _REG_SYSTEM_STATE else None  # Bulk charging
+    )
+    driver = _driver(client=client)
+
+    data = await driver.read_telemetry(["ess_control_mode"])
+    assert data["ess_control_mode"] == "Not external control (state 3)"
 
 
 # ----------------------------------------------------------------------
