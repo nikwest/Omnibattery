@@ -17,6 +17,7 @@ import pytest
 
 from custom_components.omnibattery.drivers import DriverCapabilities, VictronEssDriver
 from custom_components.omnibattery.drivers.victron import (
+    _ESS_MODE_STALE_S,
     _HARDWARE_WATCHDOG_S,
     _HUB4_MODE_EXTERNAL_CONTROL,
     _REG_SETTINGS_HUB4_MODE,
@@ -331,12 +332,16 @@ async def test_apply_setpoint_proceeds_only_when_positively_confirmed_external()
 @pytest.mark.asyncio
 async def test_apply_setpoint_refuses_when_ess_mode_confirmation_is_stale():
     """A True that stopped being refreshed must not be trusted forever: once
-    the register has gone unanswered for longer than the hardware's own
-    watchdog window, a cached 'yes' is as good as no confirmation at all."""
+    the register has gone unanswered for longer than its own staleness
+    margin, a cached 'yes' is as good as no confirmation at all. This uses
+    its own constant (not _HARDWARE_WATCHDOG_S) because ess_control_mode
+    polls on a slower ~30s cadence than ac_out_load's ~2s — reusing the same
+    60s bound here gave only 2x margin and tripped on a single missed poll,
+    producing a write/passthrough/rewrite oscillation on real hardware."""
     client = _fake_client()
     driver = _driver(
         client=client, consumption=0, ess_mode_external=True,
-        ess_mode_age_s=_HARDWARE_WATCHDOG_S + 1,
+        ess_mode_age_s=_ESS_MODE_STALE_S + 1,
     )
 
     result = await driver.apply_setpoint(500)

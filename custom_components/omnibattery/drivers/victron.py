@@ -78,6 +78,18 @@ _HARDWARE_WATCHDOG_S = 60.0       # passthrough fallback after this long unwritt
 _SETPOINT_REFRESH_INTERVAL_S = 45.0  # rewrite margin ahead of the watchdog
 _MIN_ACTUATOR_LATENCY_S = 2.0     # reasoned floor; not a measurement
 
+# How long a confirmed value may go without a fresh read before apply_setpoint
+# treats it as unconfirmed again (see VictronEssDriver._is_fresh). Each needs
+# its own margin over its own polling cadence, not the Multi's watchdog
+# number: ac_out_load polls every ~2s, so _HARDWARE_WATCHDOG_S (60s) is ~30x
+# that and safely clear of ordinary jitter. ess_control_mode polls only every
+# ~30s — reusing the same 60s bound gave it just 2x margin, so a single
+# missed poll could push the gap past the threshold and trip the gate. That
+# is exactly what produced a write/passthrough/rewrite oscillation on real
+# hardware: the gate refuses, the Multi's own watchdog reverts to passthrough
+# within the same window, the next successful poll reopens the gate, repeat.
+_ESS_MODE_STALE_S = 150.0  # 5x its ~30s cadence
+
 _WRITE_CONTROLS = {
     "disable_charge": _REG_VEBUS_DISABLE_CHARGE,
     "disable_feedin": _REG_VEBUS_DISABLE_FEEDIN,
@@ -296,16 +308,17 @@ class VictronEssDriver(BatteryDriver):
         return {"ac_power_setpoint": ac_power_setpoint, "battery_setpoint_w": battery_setpoint_w}
 
     @staticmethod
-    def _is_fresh(last_success_monotonic: float) -> bool:
+    def _is_fresh(last_success_monotonic: float, max_age_s: float) -> bool:
         """Whether a value refreshed at this monotonic time is still trusted.
 
         Caps how long a cached "last known good" value may be relied on once
         its register stops answering — otherwise a value that was confirmed
         once but never updates again (reads silently failing) would be
-        trusted forever. Bounded to the same window the hardware itself gives
-        up in, so this driver's memory of "yes" cannot outlive the Multi's.
+        trusted forever. ``max_age_s`` is the caller's own margin over its own
+        polling cadence, not a single shared number — see
+        ``_ESS_MODE_STALE_S`` for why that distinction matters.
         """
-        return asyncio.get_running_loop().time() - last_success_monotonic <= _HARDWARE_WATCHDOG_S
+        return asyncio.get_running_loop().time() - last_success_monotonic <= max_age_s
 
     async def apply_setpoint(
         self,
@@ -319,7 +332,9 @@ class VictronEssDriver(BatteryDriver):
             min(self._capabilities.max_charge_power_w, int(net_power_w)),
         )
 
-        if self._ess_mode_confirmed_external is not True or not self._is_fresh(self._ess_mode_monotonic):
+        if self._ess_mode_confirmed_external is not True or not self._is_fresh(
+            self._ess_mode_monotonic, _ESS_MODE_STALE_S
+        ):
             # Fail-closed: only a positively-confirmed *and fresh* True
             # proceeds — a stale True (the register stopped answering after
             # once confirming) refuses exactly like an outright False.
@@ -327,7 +342,9 @@ class VictronEssDriver(BatteryDriver):
                 ok=False, net_power_w=applied, confirmed=False,
                 failure_reason="ess_mode_not_confirmed_external",
             )
-        if self._ac_out_load_w is None or not self._is_fresh(self._ac_out_load_monotonic):
+        if self._ac_out_load_w is None or not self._is_fresh(
+            self._ac_out_load_monotonic, _HARDWARE_WATCHDOG_S
+        ):
             # No safe way to translate battery power into the grid-point
             # register without a fresh reading. Refuse rather than guess.
             return SetpointResult(
