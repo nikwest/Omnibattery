@@ -10,7 +10,12 @@ checked against ``attributes.csv`` from ``victronenergy/dbus_modbustcp``.
 Two refusals in ``apply_setpoint`` are deliberate, not missing error
 handling: it writes only once the AC-out load has been read at least once,
 and only once ``Hub4Mode`` is positively confirmed External control — an
-unreadable or unread check refuses exactly like a confirmed-wrong one.
+unreadable or unread check refuses exactly like a confirmed-wrong one. Both
+checks also expire: a value that stops refreshing (the register starts
+failing after having answered before) is treated the same as one that was
+never read at all once it is older than ``_HARDWARE_WATCHDOG_S`` — a stale
+"yes" must not outlive the same window the hardware itself uses to give up
+on an unwritten setpoint.
 
 Design history, the bugs this went through, and what remains unverified on
 real hardware are in the project guide page's technical notes
@@ -19,6 +24,7 @@ real hardware are in the project guide page's technical notes
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import replace
 from typing import Optional
@@ -126,12 +132,16 @@ class VictronEssDriver(BatteryDriver):
         self._system_unit_id = int(system_unit_id)
         self._client = client if client is not None else VictronModbusClient(host, port)
         self._shutting_down = False
-        # AC-out load, for the compensation formula. None until first read;
-        # apply_setpoint refuses to write while it is None.
+        # AC-out load, for the compensation formula, plus when it was last
+        # refreshed (monotonic). None until first read; apply_setpoint
+        # refuses to write while it is None or stale — see _is_fresh.
         self._ac_out_load_w: Optional[float] = None
-        # Hub4Mode == 3, confirmed. Fail-closed: apply_setpoint writes only
-        # when this is True; None and False both refuse.
+        self._ac_out_load_monotonic = 0.0
+        # Hub4Mode == 3, confirmed, plus when it was last refreshed.
+        # Fail-closed: apply_setpoint writes only when this is True *and*
+        # fresh; None, False, and stale-True all refuse.
         self._ess_mode_confirmed_external: Optional[bool] = None
+        self._ess_mode_monotonic = 0.0
 
         max_charge_power_w = max(0, int(max_charge_power_w))
         max_discharge_power_w = max(0, int(max_discharge_power_w))
@@ -232,9 +242,12 @@ class VictronEssDriver(BatteryDriver):
             if regs is not None:
                 load = decode_i32(regs, 0)
                 self._ac_out_load_w = load
+                self._ac_out_load_monotonic = asyncio.get_running_loop().time()
                 snapshot["ac_out_load"] = load
             # A failed read keeps the last known value rather than clearing it
-            # to None, so one missed poll doesn't immediately refuse writes.
+            # to None, so one missed poll doesn't immediately refuse writes —
+            # but it also doesn't refresh the timestamp, so apply_setpoint's
+            # freshness check still catches a value that has gone stale.
 
         if requested is None or "ac_power_setpoint" in requested:
             regs = await self._client.async_read_holding_block(
@@ -258,11 +271,13 @@ class VictronEssDriver(BatteryDriver):
             if regs is not None:
                 mode = decode_u16(regs, 0)
                 self._ess_mode_confirmed_external = mode == _HUB4_MODE_EXTERNAL_CONTROL
+                self._ess_mode_monotonic = asyncio.get_running_loop().time()
                 snapshot["ess_control_mode"] = _HUB4_MODE_LABELS.get(
                     mode, f"Unknown ESS mode ({mode})"
                 )
-            # A failed read keeps the last known value — None before the
-            # first successful read, which apply_setpoint refuses on.
+            # A failed read keeps the last known value without refreshing the
+            # timestamp, so a confirmation that stops being renewed goes
+            # stale and apply_setpoint's freshness check refuses on it.
 
         return snapshot
 
@@ -280,6 +295,18 @@ class VictronEssDriver(BatteryDriver):
         # battery_setpoint_w is the battery intent net_power_from_data reads.
         return {"ac_power_setpoint": ac_power_setpoint, "battery_setpoint_w": battery_setpoint_w}
 
+    @staticmethod
+    def _is_fresh(last_success_monotonic: float) -> bool:
+        """Whether a value refreshed at this monotonic time is still trusted.
+
+        Caps how long a cached "last known good" value may be relied on once
+        its register stops answering — otherwise a value that was confirmed
+        once but never updates again (reads silently failing) would be
+        trusted forever. Bounded to the same window the hardware itself gives
+        up in, so this driver's memory of "yes" cannot outlive the Multi's.
+        """
+        return asyncio.get_running_loop().time() - last_success_monotonic <= _HARDWARE_WATCHDOG_S
+
     async def apply_setpoint(
         self,
         net_power_w: int,
@@ -292,15 +319,17 @@ class VictronEssDriver(BatteryDriver):
             min(self._capabilities.max_charge_power_w, int(net_power_w)),
         )
 
-        if self._ess_mode_confirmed_external is not True:
-            # Fail-closed: only a positively-confirmed True proceeds.
+        if self._ess_mode_confirmed_external is not True or not self._is_fresh(self._ess_mode_monotonic):
+            # Fail-closed: only a positively-confirmed *and fresh* True
+            # proceeds — a stale True (the register stopped answering after
+            # once confirming) refuses exactly like an outright False.
             return SetpointResult(
                 ok=False, net_power_w=applied, confirmed=False,
                 failure_reason="ess_mode_not_confirmed_external",
             )
-        if self._ac_out_load_w is None:
+        if self._ac_out_load_w is None or not self._is_fresh(self._ac_out_load_monotonic):
             # No safe way to translate battery power into the grid-point
-            # register without this. Refuse rather than guess.
+            # register without a fresh reading. Refuse rather than guess.
             return SetpointResult(
                 ok=False, net_power_w=applied, confirmed=False,
                 failure_reason="consumption_unavailable",

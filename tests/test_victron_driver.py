@@ -10,12 +10,14 @@ has caught so far, and what is still unverified.
 """
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from custom_components.omnibattery.drivers import DriverCapabilities, VictronEssDriver
 from custom_components.omnibattery.drivers.victron import (
+    _HARDWARE_WATCHDOG_S,
     _HUB4_MODE_EXTERNAL_CONTROL,
     _REG_SETTINGS_HUB4_MODE,
     _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1,
@@ -43,7 +45,10 @@ def _fake_client():
     return client
 
 
-def _driver(client=None, consumption=0, ess_mode_external=True, **kw):
+def _driver(
+    client=None, consumption=0, ess_mode_external=True,
+    consumption_age_s=0.0, ess_mode_age_s=0.0, **kw,
+):
     """Build a driver with sane defaults for the control-path tests.
 
     ``consumption=0`` makes the AC-consumption compensation a no-op by
@@ -52,8 +57,13 @@ def _driver(client=None, consumption=0, ess_mode_external=True, **kw):
     ``ess_mode_external=True`` is NOT the driver's own starting state (that's
     None, before any telemetry poll) — it's set here so tests exercising the
     write path don't also have to care about the fail-closed ESS-mode gate;
-    the gate itself has its own dedicated tests below, covering None and
-    False explicitly.
+    the gate itself has its own dedicated tests below, covering None, False,
+    and staleness explicitly. ``*_age_s`` back-dates the matching monotonic
+    timestamp by that many seconds, to simulate a value that stopped
+    refreshing; 0.0 (the default) means "just read, fully fresh". asyncio's
+    default event loop implements ``loop.time()`` as ``time.monotonic()``, so
+    stamping with the latter here is directly comparable to what the driver
+    itself stamps.
     """
     kw.setdefault("vebus_unit_id", 227)
     kw.setdefault("system_unit_id", 100)
@@ -61,7 +71,9 @@ def _driver(client=None, consumption=0, ess_mode_external=True, **kw):
     kw.setdefault("max_discharge_power_w", 5000)
     driver = VictronEssDriver("1.2.3.4", 502, client=client or _fake_client(), **kw)
     driver._ac_out_load_w = consumption
+    driver._ac_out_load_monotonic = time.monotonic() - consumption_age_s
     driver._ess_mode_confirmed_external = ess_mode_external
+    driver._ess_mode_monotonic = time.monotonic() - ess_mode_age_s
     return driver
 
 
@@ -314,6 +326,60 @@ async def test_apply_setpoint_proceeds_only_when_positively_confirmed_external()
 
     client.async_write_registers.assert_awaited_once()
     assert result.ok is True
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_refuses_when_ess_mode_confirmation_is_stale():
+    """A True that stopped being refreshed must not be trusted forever: once
+    the register has gone unanswered for longer than the hardware's own
+    watchdog window, a cached 'yes' is as good as no confirmation at all."""
+    client = _fake_client()
+    driver = _driver(
+        client=client, consumption=0, ess_mode_external=True,
+        ess_mode_age_s=_HARDWARE_WATCHDOG_S + 1,
+    )
+
+    result = await driver.apply_setpoint(500)
+
+    client.async_write_registers.assert_not_awaited()
+    assert result.ok is False
+    assert result.failure_reason == "ess_mode_not_confirmed_external"
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_refuses_when_ac_out_load_is_stale():
+    client = _fake_client()
+    driver = _driver(
+        client=client, consumption=2000,
+        consumption_age_s=_HARDWARE_WATCHDOG_S + 1,
+    )
+
+    result = await driver.apply_setpoint(500)
+
+    client.async_write_registers.assert_not_awaited()
+    assert result.ok is False
+    assert result.failure_reason == "consumption_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_refreshes_the_freshness_timestamps():
+    """The mechanism the staleness tests above rely on: a successful read
+    must actually stamp 'now', not just cache the value."""
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            [0, 1800] if start == _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1
+            else [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE
+            else None
+        )
+    )
+    driver = _driver(client=client, consumption=None, ess_mode_external=None)
+
+    before = time.monotonic()
+    await driver.read_telemetry(["ac_out_load", "ess_control_mode"])
+
+    assert driver._ac_out_load_monotonic >= before
+    assert driver._ess_mode_monotonic >= before
 
 
 @pytest.mark.asyncio
