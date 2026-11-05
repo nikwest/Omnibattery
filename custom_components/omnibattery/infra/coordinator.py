@@ -27,6 +27,7 @@ from ..drivers.anker import AnkerModbusDriver
 from ..drivers.sessy import SessyLocalDriver
 from ..drivers.hoymiles import HoymilesMqttDriver
 from ..drivers.huawei import HuaweiSolarDriver
+from ..drivers.victron import VictronEssDriver
 from ..drivers.base import SetpointResult
 from ..backup_discharge_store import BackupDischargeEnergyStore
 from ..energy import BackupDischargeAccumulator
@@ -326,6 +327,8 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                  huawei_battery_device_id: str | None = None,
                  huawei_direct_write: bool = False,
                  huawei_emma_slave_id: int | None = None,
+                 victron_vebus_unit_id: int | None = None,
+                 victron_battery_unit_id: int | None = None,
                  username: str = "",
                  password: str = "",
                  battery_manual_mode_enabled: bool = False,
@@ -364,7 +367,7 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
         self.brand = brand
         self.ems_version = ems_version
         self.zendure_model = zendure_model
-        if self.brand in ("zendure", "anker", "hoymiles", "huawei"):
+        if self.brand in ("zendure", "anker", "hoymiles", "huawei", "victron"):
             full_charge_voltage_taper_enabled = False
 
         # Validate and store battery version
@@ -551,6 +554,20 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
             self.driver = HoymilesMqttDriver(
                 hass, self.host,
                 model=hoymiles_model,
+                max_charge_power_w=self.configured_max_charge_power,
+                max_discharge_power_w=self.configured_max_discharge_power,
+            )
+        elif self.brand == "victron":
+            # host/port address the GX device; the Multiplus/Quattro and the
+            # communicating battery are two different unit ids on that one
+            # Modbus-TCP connection, not two different hosts.
+            self.victron_vebus_unit_id = victron_vebus_unit_id
+            self.victron_battery_unit_id = victron_battery_unit_id
+            self.driver = VictronEssDriver(
+                self.host,
+                self.port,
+                vebus_unit_id=victron_vebus_unit_id,
+                battery_unit_id=victron_battery_unit_id,
                 max_charge_power_w=self.configured_max_charge_power,
                 max_discharge_power_w=self.configured_max_discharge_power,
             )

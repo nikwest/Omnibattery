@@ -893,6 +893,12 @@ class ChargeDischargeController:
         # declared engage grace) after either direction flip so a slow inverter is
         # not excluded while it is engaging. See _set_battery_power.
         self._last_commanded_net_sign: dict[MarstekVenusDataUpdateCoordinator, int] = {}
+        # Last time a real setpoint write was issued to a coordinator whose
+        # driver declares ``setpoint_refresh_interval_s`` (Victron's ESS
+        # external-control watchdog: an unwritten AcPowerSetpoint reverts the
+        # Multi to passthrough after 60s). Every other driver's
+        # ``setpoint_refresh_interval_s`` is None and never touches this.
+        self._last_setpoint_refresh: dict[MarstekVenusDataUpdateCoordinator, float] = {}
         self._charge_engage_started: dict[MarstekVenusDataUpdateCoordinator, datetime] = {}
         self._discharge_engage_started: dict[MarstekVenusDataUpdateCoordinator, datetime] = {}
         # Top-of-charge taper grace: the time a battery was first seen charging
@@ -6921,7 +6927,25 @@ class ChargeDischargeController:
             readback_latency_s <= HOT_PATH_READBACK_MAX_LATENCY_S
         )
         current_net = coordinator.driver.net_power_from_data(data)
-        if not force_write and current_net is not None and current_net == net_power:
+        # A driver can declare a hardware watchdog that reverts control if its
+        # setpoint goes unwritten for too long (Victron ESS external control:
+        # Hub4/L1/AcPowerSetpoint must be rewritten at least once every 60s or
+        # the Multi falls back to passthrough). The bus-load skip below would
+        # otherwise never rewrite an unchanged, correctly-held command at all.
+        # Tracked per coordinator so one battery's refresh cadence cannot
+        # borrow another's clock; every driver without the capability (None)
+        # leaves this branch inert and behaves exactly as before.
+        refresh_interval_s = getattr(
+            coordinator.capabilities, "setpoint_refresh_interval_s", None
+        )
+        effective_force_write = force_write
+        if not effective_force_write and refresh_interval_s is not None:
+            last_refresh = self._last_setpoint_refresh.get(coordinator, 0.0)
+            if time.monotonic() - last_refresh >= refresh_interval_s:
+                effective_force_write = True
+        if effective_force_write and refresh_interval_s is not None:
+            self._last_setpoint_refresh[coordinator] = time.monotonic()
+        if not effective_force_write and current_net is not None and current_net == net_power:
             skip_write = True
             if net_power == 0:
                 # Commanded idle but the battery is actually discharging means it
@@ -10812,6 +10836,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             huawei_battery_device_id=battery_config.get("huawei_battery_device_id"),
             huawei_direct_write=battery_config.get("huawei_direct_write", False),
             huawei_emma_slave_id=battery_config.get("huawei_emma_slave_id"),
+            victron_vebus_unit_id=battery_config.get("victron_vebus_unit_id"),
+            victron_battery_unit_id=battery_config.get("victron_battery_unit_id"),
             username=battery_config.get(CONF_USERNAME, ""),
             password=battery_config.get(CONF_PASSWORD, ""),
             battery_manual_mode_enabled=battery_config.get(

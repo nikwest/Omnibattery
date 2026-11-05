@@ -80,8 +80,8 @@ async def async_setup_entry(
             entities.append(BatteryAllowDischargeSwitch(hass, entry, controller, coordinator))
             entities.append(BatteryManualModeSwitch(hass, entry, controller, coordinator))
             # Marstek-only cell maintenance: voltage taper needs per-cell
-            # voltages that Anker/Zendure do not expose in the same way.
-            if coordinator.brand not in ("zendure", "anker"):
+            # voltages that Anker/Zendure/Victron do not expose in the same way.
+            if coordinator.brand not in ("zendure", "anker", "victron"):
                 entities.append(BatteryFullChargeVoltageTaperSwitch(hass, entry, controller, coordinator))
 
     # Add manual mode switch (system-level, always present)

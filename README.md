@@ -9,6 +9,7 @@
 - Anker SOLIX Solarbank Max AC and Solarbank 4 E5000 Pro via Modbus TCP (thanks @wouterbouvy!)
 - Sessy Home Battery (Looking for testers!!!)
 - Hoymiles MS-A2 and HiBattery MQTT models
+- Victron Multiplus/Quattro with a communicating battery, via ESS external control (Experimental — looking for testers!!!)
 
 ## Key Features
 

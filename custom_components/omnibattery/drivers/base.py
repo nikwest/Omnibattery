@@ -157,6 +157,16 @@ class DriverCapabilities:
     # and starve the back-off. Defaults False (a plain cache read proves nothing).
     telemetry_liveness_checked: bool = False
 
+    # Seconds after which the control loop must rewrite the setpoint even when
+    # it is unchanged, or None when no hardware watchdog requires it. Victron's
+    # ESS external control falls back to passthrough if Hub4/L1/AcPowerSetpoint
+    # goes unwritten for 60 s — the bus-load skip-write in
+    # ChargeDischargeController._set_battery_power would otherwise never
+    # rewrite an unchanged, correctly-held command at all. None (the default)
+    # preserves every existing driver's behaviour; a driver with this kind of
+    # watchdog must set it below the hardware's own timeout with margin.
+    setpoint_refresh_interval_s: Optional[float] = None
+
     # Inclusive SOC window (percent) each cutoff control may offer. The defaults
     # are the Venus D's hardware floors, which is what the software-limit entity
     # hard-coded before these existed; a driver whose hardware means something

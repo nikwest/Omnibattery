@@ -673,6 +673,28 @@
         "description": "{count} inverters with a battery answered on this Modbus endpoint. Huawei inverters can be cascaded — pick the one this battery belongs to. For a second battery, add another entry with the other slave id.",
         "data": {"slave_id": "Inverter"}
       },
+      "battery_connection_victron": {
+        "title": "Configure battery {battery_num} — Connection (Victron)",
+        "description": "Battery {battery_num} is a Multiplus/Quattro behind a Victron GX device (Cerbo GX, Venus GX, or Venus OS), driven through ESS external control. Enter the GX device's own address, not the Multi's — it has no network connection of its own. Find the two unit ids under Settings → Services → Modbus/TCP → Available services on the GX device; they are not guessable and vary per installation. Before this works, set Settings → ESS → Mode to \"External control\" on the GX device.",
+        "data": {
+          "name": "Name",
+          "host": "IP Address",
+          "port": "Modbus Port",
+          "victron_vebus_unit_id": "Multiplus/Quattro (vebus) unit id",
+          "victron_battery_unit_id": "Battery unit id",
+          "max_charge_power": "Max Charge Power (W)",
+          "max_discharge_power": "Max Discharge Power (W)"
+        },
+        "data_description": {
+          "name": "Descriptive name to identify this battery",
+          "host": "Address of the GX device, not the Multiplus/Quattro itself",
+          "port": "Modbus TCP port (default 502)",
+          "victron_vebus_unit_id": "Unit id of the vebus (Multiplus/Quattro) service",
+          "victron_battery_unit_id": "Unit id of the communicating battery service",
+          "max_charge_power": "Safe charge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately",
+          "max_discharge_power": "Safe discharge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Enter connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -1282,6 +1304,28 @@
         "description": "{count} inverters with a battery answered on this Modbus endpoint. Huawei inverters can be cascaded — pick the one this battery belongs to. For a second battery, add another entry with the other slave id.",
         "data": {"slave_id": "Inverter"}
       },
+      "battery_connection_victron": {
+        "title": "Configure battery {battery_num} — Connection (Victron)",
+        "description": "Battery {battery_num} is a Multiplus/Quattro behind a Victron GX device (Cerbo GX, Venus GX, or Venus OS), driven through ESS external control. Enter the GX device's own address, not the Multi's — it has no network connection of its own. Find the two unit ids under Settings → Services → Modbus/TCP → Available services on the GX device; they are not guessable and vary per installation. Before this works, set Settings → ESS → Mode to \"External control\" on the GX device.",
+        "data": {
+          "name": "Name",
+          "host": "IP Address",
+          "port": "Modbus Port",
+          "victron_vebus_unit_id": "Multiplus/Quattro (vebus) unit id",
+          "victron_battery_unit_id": "Battery unit id",
+          "max_charge_power": "Max Charge Power (W)",
+          "max_discharge_power": "Max Discharge Power (W)"
+        },
+        "data_description": {
+          "name": "Descriptive name to identify this battery",
+          "host": "Address of the GX device, not the Multiplus/Quattro itself",
+          "port": "Modbus TCP port (default 502)",
+          "victron_vebus_unit_id": "Unit id of the vebus (Multiplus/Quattro) service",
+          "victron_battery_unit_id": "Unit id of the communicating battery service",
+          "max_charge_power": "Safe charge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately",
+          "max_discharge_power": "Safe discharge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Modify connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -1409,6 +1453,12 @@
       },
       "lamp_switch": {
         "name": "Status LEDs"
+      },
+      "disable_charge": {
+        "name": "ESS Disable Charge"
+      },
+      "disable_feedin": {
+        "name": "ESS Disable Feed-in"
       },
       "weekly_full_charge_enabled": {
         "name": "Weekly Full Charge"
@@ -1888,6 +1938,9 @@
       },
       "inverter_ac_power": {
         "name": "Inverter AC Power"
+      },
+      "ac_power_setpoint": {
+        "name": "ESS AC Power Setpoint"
       },
       "charging_cutoff_capacity": {
         "name": "Charging Cutoff"
