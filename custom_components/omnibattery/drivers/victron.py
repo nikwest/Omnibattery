@@ -21,12 +21,14 @@ the full writeup; the short version:
   1500 W (``500 - 2000 = -1500``) — the opposite of what was asked, confirmed
   by Victron's own community documentation: "the point of control is at the
   AC-input of the Multi, and if there are loads on the output, your control
-  loop needs to compensate for that." This driver now reads AC consumption
-  (register 817, system aggregate) and writes
-  ``AcPowerSetpoint = battery_power_wanted + ac_consumption_now`` instead of
-  the battery figure alone. A reading of ``0 W`` wanted now correctly means
-  battery-idle (``AC_in`` tracks consumption exactly, battery untouched) —
-  it did not before this fix.
+  loop needs to compensate for that." This driver reads AC-out load
+  (``/Ac/ConsumptionOnOutput/L1/Power``, register 878 — **not** the generic
+  ``/Ac/Consumption/L1/Power`` at 817, which an earlier version of this
+  driver used and which also includes any load wired directly on AC-in,
+  overstating this term on an installation with such a load) and writes
+  ``AcPowerSetpoint = battery_power_wanted + ac_out_load_now`` instead of the
+  battery figure alone. A reading of ``0 W`` wanted now correctly means
+  battery-idle (``AC_in`` tracks the AC-out load exactly, battery untouched).
 * It must be rewritten at least once every 60 s or the Multi reverts to
   passthrough (also Victron's own documentation). That is a *safety*
   property: if Omnibattery stops running, control is handed back within a
@@ -57,19 +59,27 @@ GX device always exposes the system aggregate, while whether a separate
 per-battery Modbus service exists at all depends on the BMS and how Venus OS
 enumerates it — DVCC sees a CAN-bus battery regardless, but the Modbus-TCP
 bridge does not necessarily forward it as its own service. Every register
-this driver reads or writes (37, 38, 39, 817, 842, 843, 930) is verified
+this driver reads or writes (37, 38, 39, 842, 843, 878, 2902) is verified
 against ``attributes.csv`` from the ``victronenergy/dbus_modbustcp`` GitHub
 repository — the actual table the Modbus-TCP server is generated from — not
 a secondhand transcription.
 
-``/SystemState/State`` (register 930, same unit id; ``252`` means External
-control) is read on a best-effort basis to confirm ESS is actually in
-external control before writing, and to detect when it visibly is not (e.g.
-``Passthru`` — the watchdog already fired). A failed read is treated as
-unknown, not as a failure. Writing ESS Mode back on ``standby()`` is not
-implemented: no source consulted confirms a write to that settings register
-actually succeeds, and guessing wrong risks leaving the system in a worse
-state than just waiting out the 60 s watchdog.
+``Settings/CGwacs/Hub4Mode`` (register 2902, same unit id; ``3`` means
+External control) is read before every write to confirm ESS is actually in
+external control. **Unlike every other refusal in this driver, this one
+treats "couldn't confirm" the same as "confirmed wrong": `apply_setpoint`
+writes only when this is positively ``True``, never on `None`.** An earlier
+version used `/SystemState/State` (930) for this check and treated a failed
+read as "nothing to act on, proceed" — reasonable in isolation, but on a
+real GX device register 930 returned a read error while 2902 answered fine
+and read ``1`` (plain ESS, not External control). The permissive default
+would have let this driver write anyway, competing with Victron's own ESS
+algorithm for the same inverter. Measured hardware behaviour overrides the
+secondhand reasoning that picked 930 in the first place; the gate is now
+fail-closed instead of fail-open. Writing ESS Mode back on ``standby()`` is
+still not implemented: no source consulted confirms a *write* to this
+settings register succeeds, and guessing wrong risks leaving the system in a
+worse state than just waiting out the 60 s watchdog.
 """
 
 from __future__ import annotations
@@ -81,6 +91,7 @@ from typing import Optional
 from ..infra.victron_modbus_client import (
     VictronModbusClient,
     decode_i16,
+    decode_i32,
     decode_u16,
     encode_i16,
 )
@@ -116,22 +127,24 @@ _REG_VEBUS_DISABLE_FEEDIN = 39         # uint16, 0/1 (Hub4/DisableFeedIn)
 # specific battery also answers as its own Modbus service.
 _REG_SYSTEM_BATTERY_POWER = 842       # int16, W, +charge/-discharge
 _REG_SYSTEM_BATTERY_SOC = 843         # uint16, 0-100%
-_REG_SYSTEM_AC_CONSUMPTION_L1 = 817   # uint16, W — house load the Multi is serving on AC-out,
-                                       # the feedforward term apply_setpoint needs (see module docstring)
-# Aggregated operating state; 252 specifically means External control (DVCC
-# terminology) and a real-world report confirms it holds at 252 throughout —
-# it does not cycle through the normal charge-state values while external
-# control is active, which is what makes it a clean signal rather than a
-# flaky one. Read-only, so there is no ambiguity about whether this is a
-# writable-only path the way there was a reason to double-check above.
-_REG_SYSTEM_STATE = 930
-_SYSTEM_STATE_EXTERNAL_CONTROL = 252
-# The handful of other values worth naming for the diagnostic sensor — in
-# particular 8 (Passthru), which is exactly what seeing this value means the
-# 60s watchdog already fired. Not exhaustive; an unlisted value still prints
-# as "Not external control (state N)" rather than being hidden.
-_SYSTEM_STATE_LABELS = {
-    0: "Off", 1: "Low power", 2: "VE.Bus fault", 8: "Passthru", 9: "Inverting",
+# AC_out specifically — the load the Multi is serving on its own AC-out port,
+# which is the term apply_setpoint's formula needs (AC_in = AC_out +
+# battery_power). Deliberately NOT /Ac/Consumption/Lx/Power (817): that
+# aggregate also includes any load wired directly on AC-in, bypassing the
+# Multi entirely, which overstates this term on an installation with such a
+# load — an earlier version of this driver used 817 and got this wrong.
+_REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1 = 878  # int32 (2 registers), W
+
+# com.victronenergy.settings, same unit id. Confirmed readable on real
+# hardware. An earlier version of this driver preferred /SystemState/State
+# (930) instead, reasoning it was a more direct signal — but on real
+# hardware 930 returned a read error while 2902 answered fine. See the
+# module docstring for why that matters beyond just picking a register.
+_REG_SETTINGS_HUB4_MODE = 2902  # uint16; 3 = External control
+_HUB4_MODE_EXTERNAL_CONTROL = 3
+_HUB4_MODE_LABELS = {
+    1: "ESS with phase compensation", 2: "ESS without phase compensation",
+    3: "External control",
 }
 
 # Hard-coded by the Multi's own regulation, not configurable. CONFIRMED
@@ -164,7 +177,7 @@ SENSOR_DEFINITIONS: list[dict] = [
     {"key": "ac_power_setpoint", "name": "ESS AC Power Setpoint", "unit": "W",
      "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
      "category": "diagnostic", "scan_interval": "low", "enabled_by_default": True},
-    {"key": "ac_consumption", "name": "AC Consumption", "unit": "W",
+    {"key": "ac_out_load", "name": "AC Output Load", "unit": "W",
      "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
      "category": "diagnostic", "scan_interval": "high", "enabled_by_default": True},
     {"key": "ess_control_mode", "name": "ESS Control Mode", "data_type": "char",
@@ -208,11 +221,13 @@ class VictronEssDriver(BatteryDriver):
         # docstring). None until the first successful read — apply_setpoint
         # refuses to write rather than guess while this is unknown, since a
         # wrong guess reproduces the exact bug this field exists to fix.
-        self._ac_consumption_w: Optional[float] = None
-        # Best-effort ESS-mode confirmation (SystemState/State == 252). None =
-        # unknown (not yet read) — treated as "proceed, we cannot tell"; False
-        # = positively confirmed NOT external control — treated as "refuse to
-        # write, it would be pointless or misleading".
+        self._ac_out_load_w: Optional[float] = None
+        # ESS-mode confirmation (Hub4Mode == 3). Fail-closed: apply_setpoint
+        # writes only when this is positively True. None (not yet read, or a
+        # failed read) and False (confirmed not external control) are both
+        # refused — the whole point after finding that a permissive "None
+        # means proceed" default let an earlier version of this driver write
+        # while the real ESS mode was plain ESS, not external control.
         self._ess_mode_confirmed_external: Optional[bool] = None
 
         max_charge_power_w = max(0, int(max_charge_power_w))
@@ -236,11 +251,11 @@ class VictronEssDriver(BatteryDriver):
             max_discharge_power_w=max_discharge_power_w,
             has_mppt_pv=False,
             has_alarm_registers=False,
-            # SystemState/State is read for a safety check (is ESS actually in
-            # External control?), but this driver has no confirmed way to
-            # *write* ESS Mode back — see the module docstring. Claiming this
-            # capability would promise a toggle/confirm gate this driver
-            # cannot actually operate.
+            # Hub4Mode is read for a safety check (is ESS actually in External
+            # control?), but this driver has no confirmed way to *write* it
+            # back — see the module docstring. Claiming this capability would
+            # promise a toggle/confirm gate this driver cannot actually
+            # operate.
             has_rs485_control=False,
             has_energy_counters=False,
             has_daily_energy_counters=False,
@@ -251,10 +266,10 @@ class VictronEssDriver(BatteryDriver):
             setpoint_refresh_interval_s=_SETPOINT_REFRESH_INTERVAL_S,
         )
         self._read_groups = [
-            # ac_consumption is in the fast group, not "low": apply_setpoint
+            # ac_out_load is in the fast group, not "low": apply_setpoint
             # needs a fresh value every write, not whatever was last read tens
             # of seconds ago.
-            ReadGroup("high", ("battery_soc", "battery_power", "ac_consumption")),
+            ReadGroup("high", ("battery_soc", "battery_power", "ac_out_load")),
             ReadGroup("low", ("ac_power_setpoint", "disable_charge", "disable_feedin", "ess_control_mode")),
         ]
 
@@ -316,15 +331,15 @@ class VictronEssDriver(BatteryDriver):
             if regs is not None:
                 snapshot["battery_power"] = decode_i16(regs, 0)
 
-        if requested is None or "ac_consumption" in requested:
+        if requested is None or "ac_out_load" in requested:
             regs = await self._client.async_read_holding_block(
-                self._system_unit_id, _REG_SYSTEM_AC_CONSUMPTION_L1, 1
+                self._system_unit_id, _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1, 2
             )
             if regs is not None:
-                consumption = decode_u16(regs, 0)
-                self._ac_consumption_w = consumption
-                snapshot["ac_consumption"] = consumption
-            # A failed read leaves self._ac_consumption_w at its last known
+                consumption = decode_i32(regs, 0)
+                self._ac_out_load_w = consumption
+                snapshot["ac_out_load"] = consumption
+            # A failed read leaves self._ac_out_load_w at its last known
             # value rather than clearing it to None — a single missed poll
             # should not immediately refuse every write; apply_setpoint only
             # ever sees None here before the very first successful read.
@@ -346,18 +361,17 @@ class VictronEssDriver(BatteryDriver):
 
         if requested is None or "ess_control_mode" in requested:
             regs = await self._client.async_read_holding_block(
-                self._system_unit_id, _REG_SYSTEM_STATE, 1
+                self._system_unit_id, _REG_SETTINGS_HUB4_MODE, 1
             )
             if regs is not None:
-                state = decode_u16(regs, 0)
-                self._ess_mode_confirmed_external = state == _SYSTEM_STATE_EXTERNAL_CONTROL
-                snapshot["ess_control_mode"] = (
-                    "External control" if self._ess_mode_confirmed_external
-                    else _SYSTEM_STATE_LABELS.get(state, f"Not external control (state {state})")
+                mode = decode_u16(regs, 0)
+                self._ess_mode_confirmed_external = mode == _HUB4_MODE_EXTERNAL_CONTROL
+                snapshot["ess_control_mode"] = _HUB4_MODE_LABELS.get(
+                    mode, f"Unknown ESS mode ({mode})"
                 )
             # A failed read leaves self._ess_mode_confirmed_external at its
-            # last known value: unknown before the first read, not refused.
-            # The sensor key is omitted rather than publishing a guess.
+            # last known value — None before the first successful read, which
+            # apply_setpoint treats as a refusal, not as permission.
 
         return snapshot
 
@@ -365,7 +379,7 @@ class VictronEssDriver(BatteryDriver):
     def control_dependency_keys(self) -> frozenset:
         return frozenset({
             "battery_soc", "battery_power", "ac_power_setpoint",
-            "ac_consumption", "ess_control_mode",
+            "ac_out_load", "ess_control_mode",
         })
 
     # --- control (write) ----------------------------------------------------
@@ -390,15 +404,19 @@ class VictronEssDriver(BatteryDriver):
             min(self._capabilities.max_charge_power_w, int(net_power_w)),
         )
 
-        if self._ess_mode_confirmed_external is False:
-            # Writing would be pointless (the Multi's own loop is driving it,
-            # not this register) and reporting ok=True here would tell the
-            # control layer a command landed when it did not.
+        if self._ess_mode_confirmed_external is not True:
+            # Fail-closed: write only when ESS Mode is positively confirmed
+            # External control. None (not yet read, or a failed read) refuses
+            # exactly like False (confirmed wrong) — on real hardware, the
+            # register an earlier version of this gate relied on (930) failed
+            # to read while the real mode was plain ESS, and a permissive
+            # "unconfirmed means proceed" default would have written anyway,
+            # competing with Victron's own ESS algorithm for the same Multi.
             return SetpointResult(
                 ok=False, net_power_w=applied, confirmed=False,
-                failure_reason="ess_mode_not_external",
+                failure_reason="ess_mode_not_confirmed_external",
             )
-        if self._ac_consumption_w is None:
+        if self._ac_out_load_w is None:
             # Without a consumption reading there is no safe way to translate
             # a battery-power intent into the grid-point register — writing
             # the raw figure anyway is exactly the bug this field exists to
@@ -412,7 +430,7 @@ class VictronEssDriver(BatteryDriver):
         # Clamped through the same int16 round-trip the register itself
         # enforces, so the comparison below is against what the hardware can
         # actually echo rather than an unclamped intermediate value.
-        ac_in_target = decode_i16([encode_i16(applied + round(self._ac_consumption_w))])
+        ac_in_target = decode_i16([encode_i16(applied + round(self._ac_out_load_w))])
 
         ok = await self._client.async_write_registers(
             self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(ac_in_target)]

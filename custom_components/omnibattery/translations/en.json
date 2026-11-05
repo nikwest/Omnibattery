@@ -1942,8 +1942,8 @@
       "ac_power_setpoint": {
         "name": "ESS AC Power Setpoint"
       },
-      "ac_consumption": {
-        "name": "AC Consumption"
+      "ac_out_load": {
+        "name": "AC Output Load"
       },
       "ess_control_mode": {
         "name": "ESS Control Mode"

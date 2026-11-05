@@ -13,16 +13,17 @@ import pytest
 
 from custom_components.omnibattery.drivers import DriverCapabilities, VictronEssDriver
 from custom_components.omnibattery.drivers.victron import (
-    _REG_SYSTEM_AC_CONSUMPTION_L1,
+    _HUB4_MODE_EXTERNAL_CONTROL,
+    _REG_SETTINGS_HUB4_MODE,
+    _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1,
     _REG_SYSTEM_BATTERY_POWER,
     _REG_SYSTEM_BATTERY_SOC,
-    _REG_SYSTEM_STATE,
     _REG_VEBUS_AC_POWER_SETPOINT_L1,
     _REG_VEBUS_DISABLE_CHARGE,
-    _SYSTEM_STATE_EXTERNAL_CONTROL,
 )
 from custom_components.omnibattery.infra.victron_modbus_client import (
     decode_i16,
+    decode_i32,
     decode_u16,
     encode_i16,
 )
@@ -39,22 +40,24 @@ def _fake_client():
     return client
 
 
-def _driver(client=None, consumption=0, ess_mode_external=None, **kw):
+def _driver(client=None, consumption=0, ess_mode_external=True, **kw):
     """Build a driver with sane defaults for the control-path tests.
 
     ``consumption=0`` makes the AC-consumption compensation a no-op by
     default, so tests that don't care about it see the same numbers the
     pre-compensation code produced. Tests that do care pass a real value.
-    ``ess_mode_external=None`` (unknown) is the default the driver starts
-    with before any telemetry poll; pass True/False to simulate a confirmed
-    read.
+    ``ess_mode_external=True`` is NOT the driver's own starting state (that's
+    None, before any telemetry poll) — it's set here so tests exercising the
+    write path don't also have to care about the fail-closed ESS-mode gate;
+    the gate itself has its own dedicated tests below, covering None and
+    False explicitly.
     """
     kw.setdefault("vebus_unit_id", 227)
     kw.setdefault("system_unit_id", 100)
     kw.setdefault("max_charge_power_w", 5000)
     kw.setdefault("max_discharge_power_w", 5000)
     driver = VictronEssDriver("1.2.3.4", 502, client=client or _fake_client(), **kw)
-    driver._ac_consumption_w = consumption
+    driver._ac_out_load_w = consumption
     driver._ess_mode_confirmed_external = ess_mode_external
     return driver
 
@@ -164,7 +167,7 @@ async def test_read_telemetry_omits_keys_on_failed_block():
     assert "battery_soc" not in data
     assert "battery_power" not in data
     assert "ac_power_setpoint" not in data
-    assert "ac_consumption" not in data
+    assert "ac_out_load" not in data
     assert "ess_control_mode" not in data
 
 
@@ -182,23 +185,28 @@ async def test_read_telemetry_disable_flags():
 
 
 @pytest.mark.asyncio
-async def test_read_telemetry_tracks_ac_consumption_for_apply_setpoint():
+async def test_read_telemetry_tracks_ac_out_load_for_apply_setpoint():
+    """Register 878 (ConsumptionOnOutput) is int32 — two registers, not one.
+    Using 817 (plain Consumption, uint16) here was the bug a reviewer caught:
+    it also includes load wired directly on AC-in, bypassing the Multi."""
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [1800] if start == _REG_SYSTEM_AC_CONSUMPTION_L1 else None
+        side_effect=lambda unit_id, start, count: (
+            [0, 1800] if start == _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1 else None
+        )
     )
     driver = _driver(client=client, consumption=None)
 
-    data = await driver.read_telemetry(["ac_consumption"])
-    assert data["ac_consumption"] == 1800
-    assert driver._ac_consumption_w == 1800
+    data = await driver.read_telemetry(["ac_out_load"])
+    assert data["ac_out_load"] == 1800
+    assert driver._ac_out_load_w == 1800
 
 
 @pytest.mark.asyncio
 async def test_read_telemetry_reports_ess_control_mode():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [_SYSTEM_STATE_EXTERNAL_CONTROL] if start == _REG_SYSTEM_STATE else None
+        side_effect=lambda unit_id, start, count: [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE else None
     )
     driver = _driver(client=client)
 
@@ -209,27 +217,30 @@ async def test_read_telemetry_reports_ess_control_mode():
 
 @pytest.mark.asyncio
 async def test_read_telemetry_flags_non_external_ess_mode():
+    """Mode 1 ('ESS with phase compensation') is real-hardware evidence, not a
+    made-up value: a reviewer's own GX read register 2902 as 1 while this
+    driver's write path would otherwise have proceeded regardless."""
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [8] if start == _REG_SYSTEM_STATE else None  # Passthru
+        side_effect=lambda unit_id, start, count: [1] if start == _REG_SETTINGS_HUB4_MODE else None
     )
     driver = _driver(client=client)
 
     data = await driver.read_telemetry(["ess_control_mode"])
-    assert data["ess_control_mode"] == "Passthru"
+    assert data["ess_control_mode"] == "ESS with phase compensation"
     assert driver._ess_mode_confirmed_external is False
 
 
 @pytest.mark.asyncio
-async def test_read_telemetry_labels_unmapped_state_by_number():
+async def test_read_telemetry_labels_unmapped_mode_by_number():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [3] if start == _REG_SYSTEM_STATE else None  # Bulk charging
+        side_effect=lambda unit_id, start, count: [9] if start == _REG_SETTINGS_HUB4_MODE else None
     )
     driver = _driver(client=client)
 
     data = await driver.read_telemetry(["ess_control_mode"])
-    assert data["ess_control_mode"] == "Not external control (state 3)"
+    assert data["ess_control_mode"] == "Unknown ESS mode (9)"
 
 
 # ----------------------------------------------------------------------
@@ -254,7 +265,7 @@ async def test_apply_setpoint_writes_and_confirms_with_zero_consumption():
 
 
 @pytest.mark.asyncio
-async def test_apply_setpoint_adds_ac_consumption_to_the_register_write():
+async def test_apply_setpoint_adds_ac_out_load_to_the_register_write():
     """The bug the review caught: writing the battery figure straight into
     the grid-point register asks for the opposite of what was intended
     whenever house load is nonzero. A 500W charge intent with a 2000W house
@@ -327,16 +338,32 @@ async def test_apply_setpoint_refuses_when_ess_mode_confirmed_not_external():
 
     client.async_write_registers.assert_not_awaited()
     assert result.ok is False
-    assert result.failure_reason == "ess_mode_not_external"
+    assert result.failure_reason == "ess_mode_not_confirmed_external"
 
 
 @pytest.mark.asyncio
-async def test_apply_setpoint_proceeds_when_ess_mode_unconfirmed():
-    """None (couldn't check — e.g. settings service not forwarded) must not
-    block writes the way a confirmed False does."""
+async def test_apply_setpoint_refuses_when_ess_mode_unconfirmed():
+    """Fail-closed: None (not yet read, or a persistently failed read) must
+    refuse exactly like a confirmed False — this is the real bug a reviewer
+    caught. The register an earlier version of this gate used (930) failed to
+    read on their actual GX device while the real ESS mode (read via 2902)
+    was plain ESS; the old "None means proceed" default would have written
+    anyway, fighting Victron's own ESS algorithm for the same Multi."""
+    client = _fake_client()
+    driver = _driver(client=client, consumption=0, ess_mode_external=None)
+
+    result = await driver.apply_setpoint(500)
+
+    client.async_write_registers.assert_not_awaited()
+    assert result.ok is False
+    assert result.failure_reason == "ess_mode_not_confirmed_external"
+
+
+@pytest.mark.asyncio
+async def test_apply_setpoint_proceeds_only_when_positively_confirmed_external():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(return_value=[encode_i16(500)])
-    driver = _driver(client=client, consumption=0, ess_mode_external=None)
+    driver = _driver(client=client, consumption=0, ess_mode_external=True)
 
     result = await driver.apply_setpoint(500)
 
@@ -505,7 +532,7 @@ def test_control_dependency_keys():
     keys = _driver().control_dependency_keys
     assert {
         "battery_soc", "battery_power", "ac_power_setpoint",
-        "ac_consumption", "ess_control_mode",
+        "ac_out_load", "ess_control_mode",
     } <= keys
 
 
@@ -515,7 +542,7 @@ def test_entity_definitions_expose_expected_keys():
     switch_keys = {d["key"] for d in driver.switch_definitions}
     assert {
         "battery_soc", "battery_power", "ac_power_setpoint",
-        "ac_consumption", "ess_control_mode",
+        "ac_out_load", "ess_control_mode",
     } <= sensor_keys
     assert {"disable_charge", "disable_feedin"} == switch_keys
     assert driver.number_definitions == []
