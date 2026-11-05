@@ -11,17 +11,8 @@ unit-id-per-instance; the driver opens one connection and reads/writes several
 unit ids across it, mirroring Huawei's separate inverter/EMMA clients but
 without needing a second socket.
 
-Registers used by the driver, and how confident each is:
-
-* ``Hub4/L1/AcPowerSetpoint`` (37) and ``Hub4/DisableCharge`` / ``Hub4/
-  DisabledFeedIn`` (38/39) are **confirmed against Victron's own "ESS mode 2
-  and 3" documentation** — these are the published mechanism for ESS external
-  control.
-* The battery SOC/power register offsets below are **not yet confirmed on
-  hardware** — they come from community references to Victron's "CCGX
-  Modbus-TCP register list" spreadsheet, not a verified read. See
-  ``docs/research/victron/driver-assessment-victron.md`` for what still needs
-  checking before this driver is trusted for live control.
+Registers themselves (which one is which, and what each means) live in
+``drivers/victron.py``; this module only moves bytes.
 
 No post-connect pause or single-in-flight constraint is applied here, unlike
 ``HuaweiModbusClient`` — that workaround is specific to the SUN2000's own

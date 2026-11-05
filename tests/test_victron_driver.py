@@ -1,9 +1,12 @@
 """Unit tests for the Victron ESS external-control driver.
 
-Everything here exercises translation logic against a fake Modbus client —
-it proves the driver's decode/encode math and control-loop contract, not the
-vendor's register map. See docs/research/victron/driver-assessment-victron.md
-for what still needs confirming against real hardware.
+A fake Modbus client, throughout: this proves the driver's arithmetic and
+control-flow logic (clamping, the compensation formula, which refusal fires
+when) — it cannot prove a real GX device answers a given register, or that
+one register reports what its name implies versus a similarly-named
+neighbour. See the "Technical notes" section of the guide page
+(site-docs/configuration/batteries/victron.md) for what only a real device
+has caught so far, and what is still unverified.
 """
 from __future__ import annotations
 
@@ -186,9 +189,8 @@ async def test_read_telemetry_disable_flags():
 
 @pytest.mark.asyncio
 async def test_read_telemetry_tracks_ac_out_load_for_apply_setpoint():
-    """Register 878 (ConsumptionOnOutput) is int32 — two registers, not one.
-    Using 817 (plain Consumption, uint16) here was the bug a reviewer caught:
-    it also includes load wired directly on AC-in, bypassing the Multi."""
+    """Register 878 is int32 — two registers, not the uint16/one-register
+    shape of the wrong register (817) an earlier version used."""
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
@@ -202,45 +204,25 @@ async def test_read_telemetry_tracks_ac_out_load_for_apply_setpoint():
     assert driver._ac_out_load_w == 1800
 
 
+@pytest.mark.parametrize(
+    "mode, expected_label, expected_confirmed",
+    [
+        (_HUB4_MODE_EXTERNAL_CONTROL, "External control", True),
+        (1, "ESS with phase compensation", False),  # real hardware read this, not a made-up value
+        (9, "Unknown ESS mode (9)", False),  # unmapped value: labelled, not hidden
+    ],
+)
 @pytest.mark.asyncio
-async def test_read_telemetry_reports_ess_control_mode():
+async def test_read_telemetry_reports_ess_control_mode(mode, expected_label, expected_confirmed):
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE else None
+        side_effect=lambda unit_id, start, count: [mode] if start == _REG_SETTINGS_HUB4_MODE else None
     )
     driver = _driver(client=client)
 
     data = await driver.read_telemetry(["ess_control_mode"])
-    assert data["ess_control_mode"] == "External control"
-    assert driver._ess_mode_confirmed_external is True
-
-
-@pytest.mark.asyncio
-async def test_read_telemetry_flags_non_external_ess_mode():
-    """Mode 1 ('ESS with phase compensation') is real-hardware evidence, not a
-    made-up value: a reviewer's own GX read register 2902 as 1 while this
-    driver's write path would otherwise have proceeded regardless."""
-    client = _fake_client()
-    client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [1] if start == _REG_SETTINGS_HUB4_MODE else None
-    )
-    driver = _driver(client=client)
-
-    data = await driver.read_telemetry(["ess_control_mode"])
-    assert data["ess_control_mode"] == "ESS with phase compensation"
-    assert driver._ess_mode_confirmed_external is False
-
-
-@pytest.mark.asyncio
-async def test_read_telemetry_labels_unmapped_mode_by_number():
-    client = _fake_client()
-    client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [9] if start == _REG_SETTINGS_HUB4_MODE else None
-    )
-    driver = _driver(client=client)
-
-    data = await driver.read_telemetry(["ess_control_mode"])
-    assert data["ess_control_mode"] == "Unknown ESS mode (9)"
+    assert data["ess_control_mode"] == expected_label
+    assert driver._ess_mode_confirmed_external is expected_confirmed
 
 
 # ----------------------------------------------------------------------
@@ -264,57 +246,31 @@ async def test_apply_setpoint_writes_and_confirms_with_zero_consumption():
     assert result.applied == {"ac_power_setpoint": 1200, "battery_setpoint_w": 1200}
 
 
+@pytest.mark.parametrize(
+    "net_power_w, consumption, expected_register_value",
+    [
+        (500, 2000, 2500),    # charge 500W against a 2000W load -> write 2500, not 500
+        (-500, 2000, 1500),   # discharge 500W against the same load -> write 1500
+        (0, 2000, 2000),      # 0W intent -> import exactly matches the load; battery untouched
+    ],
+)
 @pytest.mark.asyncio
-async def test_apply_setpoint_adds_ac_out_load_to_the_register_write():
+async def test_apply_setpoint_compensates_for_ac_out_load(net_power_w, consumption, expected_register_value):
     """The bug the review caught: writing the battery figure straight into
     the grid-point register asks for the opposite of what was intended
-    whenever house load is nonzero. A 500W charge intent with a 2000W house
-    load must write 2500 (500 + 2000), not 500."""
+    whenever there's a load on AC-out."""
     client = _fake_client()
-    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(2500)])
-    driver = _driver(client=client, consumption=2000)
+    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(expected_register_value)])
+    driver = _driver(client=client, consumption=consumption)
 
-    result = await driver.apply_setpoint(500)
+    result = await driver.apply_setpoint(net_power_w)
 
     client.async_write_registers.assert_awaited_once_with(
-        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(2500)]
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(expected_register_value)]
     )
-    assert result.net_power_w == 500  # the battery intent, unchanged
-    assert result.applied["ac_power_setpoint"] == 2500  # the compensated register value
-    assert result.applied["battery_setpoint_w"] == 500
-
-
-@pytest.mark.asyncio
-async def test_apply_setpoint_discharge_with_consumption():
-    client = _fake_client()
-    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(1500)])
-    driver = _driver(client=client, consumption=2000)
-
-    result = await driver.apply_setpoint(-500)
-
-    client.async_write_registers.assert_awaited_once_with(
-        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(1500)]
-    )
-    assert result.net_power_w == -500
-    assert result.applied["ac_power_setpoint"] == 1500
-
-
-@pytest.mark.asyncio
-async def test_apply_setpoint_zero_means_battery_idle_not_zero_grid_flow():
-    """With the fix, a 0W intent against a 2000W house load writes 2000 to
-    the register (import exactly matches consumption, battery untouched) —
-    not 0 (which would have demanded a 2000W discharge from a battery the
-    caller asked to leave alone)."""
-    client = _fake_client()
-    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(2000)])
-    driver = _driver(client=client, consumption=2000)
-
-    result = await driver.apply_setpoint(0)
-
-    client.async_write_registers.assert_awaited_once_with(
-        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(2000)]
-    )
-    assert result.net_power_w == 0
+    assert result.net_power_w == net_power_w  # the battery intent, unchanged
+    assert result.applied["ac_power_setpoint"] == expected_register_value
+    assert result.applied["battery_setpoint_w"] == net_power_w
 
 
 @pytest.mark.asyncio
@@ -329,28 +285,17 @@ async def test_apply_setpoint_refuses_when_consumption_unknown():
     assert result.failure_reason == "consumption_unavailable"
 
 
+@pytest.mark.parametrize("ess_mode_external", [False, None])
 @pytest.mark.asyncio
-async def test_apply_setpoint_refuses_when_ess_mode_confirmed_not_external():
+async def test_apply_setpoint_refuses_unless_positively_confirmed_external(ess_mode_external):
+    """Fail-closed: False (confirmed wrong) and None (unread, or a
+    persistently failed read) both refuse — the fix for a real near-miss. An
+    earlier version treated None as "nothing to act on, proceed," and the
+    register it then relied on failed to read on real hardware while the
+    real ESS mode (read via a different, working register) was plain ESS;
+    the permissive default would have written anyway."""
     client = _fake_client()
-    driver = _driver(client=client, consumption=0, ess_mode_external=False)
-
-    result = await driver.apply_setpoint(500)
-
-    client.async_write_registers.assert_not_awaited()
-    assert result.ok is False
-    assert result.failure_reason == "ess_mode_not_confirmed_external"
-
-
-@pytest.mark.asyncio
-async def test_apply_setpoint_refuses_when_ess_mode_unconfirmed():
-    """Fail-closed: None (not yet read, or a persistently failed read) must
-    refuse exactly like a confirmed False — this is the real bug a reviewer
-    caught. The register an earlier version of this gate used (930) failed to
-    read on their actual GX device while the real ESS mode (read via 2902)
-    was plain ESS; the old "None means proceed" default would have written
-    anyway, fighting Victron's own ESS algorithm for the same Multi."""
-    client = _fake_client()
-    driver = _driver(client=client, consumption=0, ess_mode_external=None)
+    driver = _driver(client=client, consumption=0, ess_mode_external=ess_mode_external)
 
     result = await driver.apply_setpoint(500)
 

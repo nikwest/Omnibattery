@@ -52,3 +52,25 @@ Cell-balance monitoring, voltage taper, and MPPT solar telemetry are not availab
 - Confirm **Settings → ESS → Mode** is still **External control**; anything else means the GX device's own loop is driving the Multi, not Omnibattery. The **ESS Control Mode** sensor confirms this directly — and if it's missing entirely, nothing will be written at all, which is the safe failure mode.
 - If nothing is being commanded at all, check both **AC Output Load** and **ESS Control Mode** — either one being unavailable or unconfirmed blocks every write by design.
 - If the battery SOC or power reading looks wrong, compare against the official Victron GX Home Assistant integration's own sensors for the same battery, if installed.
+
+??? "Technical notes: register map, design decisions, and what caught two real bugs"
+    **Register map** (unit ids: the vebus unit id you entered for the Multi; the system unit id, default 100, for the system aggregate and settings service). Every register below is checked against `attributes.csv` from the official `victronenergy/dbus_modbustcp` GitHub repository — the actual table Victron's own Modbus-TCP server is generated from.
+
+    | Register | Path | Type | Role |
+    |---|---|---|---|
+    | 37 | `Hub4/L1/AcPowerSetpoint` | int16, W | Write: the control point (AC-input power target) |
+    | 38 / 39 | `Hub4/DisableCharge` / `DisableFeedIn` | uint16 | Write: the two safety switches |
+    | 842 | `Dc/Battery/Power` | int16, W | Read: battery power, +charge/-discharge |
+    | 843 | `Dc/Battery/Soc` | uint16, % | Read: battery SOC |
+    | 878 | `Ac/ConsumptionOnOutput/L1/Power` | int32, W | Read: AC-out load, the compensation term |
+    | 2902 | `Settings/CGwacs/Hub4Mode` | uint16 | Read: the ESS-mode safety gate (`3` = External control) |
+
+    Registers 37/38/39 are marked write-only in `attributes.csv`; the server's own source (`mappings.cpp`) shows its read path applies no such restriction, so reading them back for confirmation works regardless.
+
+    **Why AC-out load, not total consumption.** `AcPowerSetpoint` targets the Multi's AC-*input*, not the battery: energy balance at the Multi is `AC_in = AC_out + battery_power`. A command that writes the desired battery power straight into the register only works when AC-out load happens to be zero — with any house load present, it asks for the wrong thing entirely (a "charge" intent can command a discharge). The fix reads register 878 specifically, not Victron's generic `Ac/Consumption/L1/Power` (817): that aggregate can include load wired directly on AC-in, bypassing the Multi, which would overstate the compensation term on an installation with such a load.
+
+    **Why the ESS-mode gate is fail-closed.** An early version of this check used `/SystemState/State` instead of `Hub4Mode`, and treated an unanswered check as "nothing to act on, proceed." On real hardware, that register returned a read error while `Hub4Mode` answered fine and read plain ESS, not External control — a permissive default would have written anyway, competing with Victron's own ESS algorithm for the same Multi. The gate now refuses whenever it cannot positively confirm `Hub4Mode == 3`; an unread or unreadable check is treated exactly like a confirmed-wrong one, never as permission.
+
+    **What a mock-based test suite can and can't prove.** The driver's unit tests use a fake Modbus client and prove the arithmetic and control-flow logic — clamping, the compensation formula, which refusal fires when. They cannot prove a given register answers on a given GX device, or that one register reports what its name implies versus a neighbouring one with a similar name. Both real bugs above were caught by running read-only checks against actual hardware, not by the test suite — which is also why automatic control has not yet been enabled on any real installation as of this writing.
+
+    **What's still unverified:** the compensation formula itself has not been exercised with a live command against a real grid sensor (the recommended first test is a manual +200 W / -200 W step with the battery otherwise idle); the maximum simultaneous Modbus-TCP connections a GX device tolerates; and whether `Hub4Mode` is writable (only reading it is confirmed), which is why `standby()` cannot restore the GX device's own ESS mode and instead relies on the hardware's 60-second watchdog.
