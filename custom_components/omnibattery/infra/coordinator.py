@@ -1717,6 +1717,10 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
             return
         self._setpoint_refresh_monotonic = time.monotonic()
         net_power = self.commanded_charge_power - self.commanded_discharge_power
+        _LOGGER.debug(
+            "[%s] Watchdog keepalive: rewriting setpoint %dW (last rewrite >= %.0fs ago)",
+            self.name, net_power, refresh_interval_s,
+        )
         await self.apply_power(net_power, read_back=False)
 
     def _update_backup_discharge_energy(self, updated_data: dict) -> None:

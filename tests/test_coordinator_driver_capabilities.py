@@ -387,6 +387,7 @@ async def test_setpoint_refresh_skips_before_the_interval_elapses():
 
 async def test_setpoint_refresh_rewrites_the_last_commanded_net_power():
     coordinator = SimpleNamespace(
+        name="Victron Test",
         capabilities=SimpleNamespace(setpoint_refresh_interval_s=45.0),
         _is_shutting_down=False,
         is_available=True,
