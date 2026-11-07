@@ -24,10 +24,13 @@ from custom_components.omnibattery.drivers.victron import (
     _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1,
     _REG_SYSTEM_BATTERY_POWER,
     _REG_SYSTEM_BATTERY_SOC,
+    _REG_SYSTEM_BATTERY_VOLTAGE,
+    _REG_SYSTEM_SERIAL,
     _REG_VEBUS_AC_POWER_SETPOINT_L1,
     _REG_VEBUS_DISABLE_CHARGE,
 )
 from custom_components.omnibattery.infra.victron_modbus_client import (
+    decode_ascii,
     decode_i16,
     decode_i32,
     decode_u16,
@@ -142,29 +145,32 @@ def test_model_label():
 # ----------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_read_telemetry_decodes_soc_and_power():
+async def test_read_telemetry_decodes_voltage_soc_and_power():
+    """Voltage(840)/Current(841, unused)/Power(842)/Soc(843) are one
+    contiguous block, read once starting at _REG_SYSTEM_BATTERY_VOLTAGE."""
     client = _fake_client()
 
     async def fake_read(unit_id, start, count):
-        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_SOC:
-            return [65]  # 65%, no scaling on this register
-        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_POWER:
-            return [encode_i16(-320)]  # discharging 320W
+        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_VOLTAGE and count == 4:
+            return [530, 0, encode_i16(-320) & 0xFFFF, 65]
         return None
 
     client.async_read_holding_block = AsyncMock(side_effect=fake_read)
     driver = _driver(client=client)
 
-    data = await driver.read_telemetry(["battery_soc", "battery_power"])
-    assert data["battery_soc"] == 65
+    data = await driver.read_telemetry(["battery_soc", "battery_power", "battery_voltage"])
+    assert data["battery_voltage"] == 530  # scaled 0.1 -> 53.0V at the sensor layer
     assert data["battery_power"] == -320
+    assert data["battery_soc"] == 65
 
 
 @pytest.mark.asyncio
 async def test_read_telemetry_rejects_out_of_range_soc():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [0xFFFF] if start == _REG_SYSTEM_BATTERY_SOC else None
+        side_effect=lambda unit_id, start, count: (
+            [0, 0, 0, 0xFFFF] if start == _REG_SYSTEM_BATTERY_VOLTAGE else None
+        )
     )
     driver = _driver(client=client)
 
@@ -182,6 +188,7 @@ async def test_read_telemetry_omits_keys_on_failed_block():
     data = await driver.read_telemetry(None)
     assert "battery_soc" not in data
     assert "battery_power" not in data
+    assert "battery_voltage" not in data
     assert "ac_power_setpoint" not in data
     assert "ac_out_load" not in data
     assert "ess_control_mode" not in data
@@ -525,6 +532,31 @@ async def test_connect_close_delegate_to_client():
 
 
 @pytest.mark.asyncio
+async def test_connect_reads_the_serial_once():
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            [0x4858, 0x3132, 0x3334, 0, 0, 0] if start == _REG_SYSTEM_SERIAL else None
+        )
+    )
+    driver = _driver(client=client)
+
+    assert await driver.connect() is True
+    assert driver.serial == "HX1234"
+
+
+@pytest.mark.asyncio
+async def test_connect_tolerates_an_unreadable_serial():
+    """An older Venus OS, or the register just not forwarded, must not fail
+    the connection — serial simply stays None, like any driver with none."""
+    client = _fake_client()
+    driver = _driver(client=client)
+
+    assert await driver.connect() is True
+    assert driver.serial is None
+
+
+@pytest.mark.asyncio
 async def test_probe_requires_both_unit_ids_to_answer(monkeypatch):
     from custom_components.omnibattery.drivers import victron as victron_mod
 
@@ -557,7 +589,7 @@ def test_entity_definitions_expose_expected_keys():
     sensor_keys = {d["key"] for d in driver.sensor_definitions}
     switch_keys = {d["key"] for d in driver.switch_definitions}
     assert {
-        "battery_soc", "battery_power", "ac_power_setpoint",
+        "battery_soc", "battery_power", "battery_voltage", "ac_power_setpoint",
         "ac_out_load", "ess_control_mode",
     } <= sensor_keys
     assert {"disable_charge", "disable_feedin"} == switch_keys
@@ -571,3 +603,34 @@ def test_switch_definitions_declare_command_values():
     for definition in _driver().switch_definitions:
         assert definition["command_on"] == 1
         assert definition["command_off"] == 0
+
+
+# ----------------------------------------------------------------------
+# device registry
+# ----------------------------------------------------------------------
+
+def test_device_info_reports_victron_as_the_manufacturer():
+    """The brand chain used to fall through to Marstek for every new brand
+    that forgot to add itself (same bug fixed for Huawei) — a Victron
+    battery read device card "Marstek / Victron ESS (Multiplus/Quattro)"."""
+    from types import SimpleNamespace
+
+    from custom_components.omnibattery.infra.coordinator import (
+        MarstekVenusDataUpdateCoordinator,
+    )
+
+    coordinator = SimpleNamespace(
+        device_key="192.0.2.1_502_227",
+        name="Victron ESS",
+        brand="victron",
+        driver=SimpleNamespace(
+            model_label="Victron ESS (Multiplus/Quattro)", serial="HQ1234ABCDE",
+        ),
+        host="192.0.2.1",
+        port=502,
+        data={},
+    )
+    info = MarstekVenusDataUpdateCoordinator.battery_device_info.fget(coordinator)
+    assert info["manufacturer"] == "Victron"
+    assert info["model"] == "Victron ESS (Multiplus/Quattro)"
+    assert info["serial_number"] == "HQ1234ABCDE"

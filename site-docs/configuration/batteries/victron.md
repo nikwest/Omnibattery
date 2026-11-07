@@ -37,7 +37,7 @@ The wizard confirms both unit ids answer over Modbus; it cannot confirm the regi
 
 ## What you will see
 
-You will see automatic battery control and the shared manual power controls, plus **ESS Disable Charge** and **ESS Disable Feed-in** switches, an **ESS AC Power Setpoint** sensor (the raw grid-point register, after AC-out compensation — not the battery power), and two more diagnostic sensors: **AC Output Load** (specifically the load on the Multi's AC-out port — deliberately not Victron's generic "consumption" figure, which can also include load wired directly on AC-in and would overstate this term wherever that applies) and **ESS Control Mode** (reports "External control" only when the GX device's own ESS-mode setting agrees).
+You will see automatic battery control and the shared manual power controls, plus **ESS Disable Charge** and **ESS Disable Feed-in** switches, a **Battery Voltage** sensor, an **ESS AC Power Setpoint** sensor (the raw grid-point register, after AC-out compensation — not the battery power), and two more diagnostic sensors: **AC Output Load** (specifically the load on the Multi's AC-out port — deliberately not Victron's generic "consumption" figure, which can also include load wired directly on AC-in and would overstate this term wherever that applies) and **ESS Control Mode** (reports "External control" only when the GX device's own ESS-mode setting agrees). The device page also shows the GX device's own serial number, when it answers that register.
 
 A zero command means the battery is left alone (import is set to match the AC-out load exactly). Stopping Omnibattery (or losing the connection) releases control after at most 60 seconds, when the Multi's own watchdog reverts it to passthrough; there is currently no confirmed way to restore the GX device's own ESS mode immediately, and BatteryLife stays disabled until you switch ESS Mode back yourself.
 
@@ -60,12 +60,18 @@ Cell-balance monitoring, voltage taper, and MPPT solar telemetry are not availab
     |---|---|---|---|
     | 37 | `Hub4/L1/AcPowerSetpoint` | int16, W | Write: the control point (AC-input power target) |
     | 38 / 39 | `Hub4/DisableCharge` / `DisableFeedIn` | uint16 | Write: the two safety switches |
+    | 800 | `Serial` | string[6] | Read: the GX device's own serial, once on connect — not a battery-pack serial, see below |
+    | 840 | `Dc/Battery/Voltage` | uint16, V ×10 | Read: battery voltage, same block read as 842/843 |
     | 842 | `Dc/Battery/Power` | int16, W | Read: battery power, +charge/-discharge |
     | 843 | `Dc/Battery/Soc` | uint16, % | Read: battery SOC |
     | 878 | `Ac/ConsumptionOnOutput/L1/Power` | int32, W | Read: AC-out load, the compensation term |
     | 2902 | `Settings/CGwacs/Hub4Mode` | uint16 | Read: the ESS-mode safety gate (`3` = External control) |
 
     Registers 37/38/39 are marked write-only in `attributes.csv`; the server's own source (`mappings.cpp`) shows its read path applies no such restriction, so reading them back for confirmation works regardless.
+
+    **Why there's no cell voltage, temperature, or WiFi signal.** Per-cell min/max voltage and temperature exist in the official register map, but only on a *separate* `com.victronenergy.battery` D-Bus service with its own unit id — present only when the battery itself reports cell-level data to the GX device (e.g. BYD, Pylontech, Victron's own Lithium Smart), and absent on plenty of installations (this driver talks only to the `vebus` and `system` services, which never carry cell data). Inverter/heatsink temperature (`vebus` register 61, `Dc/0/Temperature`) exists but only populates when an optional Victron temperature sensor accessory is wired to the Multi, and its unpopulated-sensor behaviour hasn't been checked against real hardware — left out rather than guessed. WiFi signal strength isn't in the Modbus-TCP map at all, for any service: it's a Venus OS network-manager value that is never forwarded to Modbus-TCP.
+
+    **Why the serial is the GX device's, not the battery's.** Register 800 lives on the `system` service — the same one already connected for battery power/SOC — so it costs nothing extra to read once on connect. It identifies the GX device (Cerbo GX, Venus GX, …), not the battery pack, since there's no separate per-battery service to read a pack serial from on an installation like the one above. It also keys the synthetic-energy backup, the same role a serial plays for every other driver: so a battery removed and re-added (after an IP change, say) reclaims its lifetime totals instead of starting over.
 
     **Why AC-out load, not total consumption.** `AcPowerSetpoint` targets the Multi's AC-*input*, not the battery: energy balance at the Multi is `AC_in = AC_out + battery_power`. A command that writes the desired battery power straight into the register only works when AC-out load happens to be zero — with any house load present, it asks for the wrong thing entirely (a "charge" intent can command a discharge). The fix reads register 878 specifically, not Victron's generic `Ac/Consumption/L1/Power` (817): that aggregate can include load wired directly on AC-in, bypassing the Multi, which would overstate the compensation term on an installation with such a load.
 

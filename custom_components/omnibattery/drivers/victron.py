@@ -31,6 +31,7 @@ from typing import Optional
 
 from ..infra.victron_modbus_client import (
     VictronModbusClient,
+    decode_ascii,
     decode_i16,
     decode_i32,
     decode_u16,
@@ -60,6 +61,13 @@ _REG_VEBUS_DISABLE_FEEDIN = 39         # uint16, 0/1 (Hub4/DisableFeedIn)
 # for confirmation works.
 
 # --- com.victronenergy.system, unit id 100 (Victron's documented default) --
+_REG_SYSTEM_SERIAL = 800              # string[6] (12 bytes) — the GX device's
+                                       # own serial, not a battery-pack serial;
+                                       # there is no separate battery service
+                                       # on every installation (see below)
+_REG_SYSTEM_BATTERY_VOLTAGE = 840     # uint16, V, scale 10 — first of 4
+                                       # contiguous registers through 843, read
+                                       # as one block below
 _REG_SYSTEM_BATTERY_POWER = 842       # int16, W, +charge/-discharge
 _REG_SYSTEM_BATTERY_SOC = 843         # uint16, 0-100%
 _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1 = 878  # int32 (2 registers), W — AC-out
@@ -102,6 +110,10 @@ SENSOR_DEFINITIONS: list[dict] = [
      "enabled_by_default": True},
     {"key": "battery_power", "name": "Battery Power", "unit": "W", "device_class": "power",
      "state_class": "measurement", "scale": 1, "precision": 0, "scan_interval": "high",
+     "enabled_by_default": True},
+    {"key": "battery_voltage", "name": "Battery Voltage", "unit": "V",
+     "device_class": "voltage", "state_class": "measurement", "scale": 0.1,
+     "precision": 1, "category": "diagnostic", "scan_interval": "high",
      "enabled_by_default": True},
     {"key": "ac_power_setpoint", "name": "ESS AC Power Setpoint", "unit": "W",
      "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
@@ -155,6 +167,10 @@ class VictronEssDriver(BatteryDriver):
         # fresh; None, False, and stale-True all refuse.
         self._ess_mode_confirmed_external: Optional[bool] = None
         self._ess_mode_monotonic = 0.0
+        # The GX device's own serial (register 800), read once on connect —
+        # not polled telemetry. None until read; also keys the synthetic-
+        # energy backup so a removed/re-added battery reclaims its totals.
+        self._serial: Optional[str] = None
 
         max_charge_power_w = max(0, int(max_charge_power_w))
         max_discharge_power_w = max(0, int(max_discharge_power_w))
@@ -187,7 +203,7 @@ class VictronEssDriver(BatteryDriver):
         )
         self._read_groups = [
             # ac_out_load is fast, not "low": apply_setpoint needs it fresh.
-            ReadGroup("high", ("battery_soc", "battery_power", "ac_out_load")),
+            ReadGroup("high", ("battery_soc", "battery_power", "battery_voltage", "ac_out_load")),
             ReadGroup("low", ("ac_power_setpoint", "disable_charge", "disable_feedin", "ess_control_mode")),
         ]
 
@@ -201,6 +217,10 @@ class VictronEssDriver(BatteryDriver):
     def model_label(self) -> Optional[str]:
         return "Victron ESS (Multiplus/Quattro)"
 
+    @property
+    def serial(self) -> Optional[str]:
+        return self._serial
+
     # --- connection lifecycle --------------------------------------------
 
     @property
@@ -208,7 +228,18 @@ class VictronEssDriver(BatteryDriver):
         return self._client.connected
 
     async def connect(self) -> bool:
-        return await self._client.async_connect()
+        if not await self._client.async_connect():
+            return False
+        # Read once, not polled: a static identifier, and a failed read here
+        # (older Venus OS, or the register just not forwarded) must not fail
+        # the connection — self._serial simply stays None, same as any driver
+        # with no serial to report.
+        regs = await self._client.async_read_holding_block(
+            self._system_unit_id, _REG_SYSTEM_SERIAL, 6
+        )
+        if regs is not None:
+            self._serial = decode_ascii(regs)
+        return True
 
     async def close(self) -> None:
         await self._client.async_close()
@@ -227,12 +258,17 @@ class VictronEssDriver(BatteryDriver):
         requested = set(keys) if keys is not None else None
         snapshot: TelemetrySnapshot = {}
 
-        if requested is None or {"battery_soc", "battery_power"} & requested:
+        if requested is None or {"battery_soc", "battery_power", "battery_voltage"} & requested:
+            # One block covers Voltage(840)/Current(841, unused)/Power(842)/
+            # Soc(843) — contiguous on the system service, so this is a single
+            # read instead of two.
             regs = await self._client.async_read_holding_block(
-                self._system_unit_id, _REG_SYSTEM_BATTERY_SOC, 1
+                self._system_unit_id, _REG_SYSTEM_BATTERY_VOLTAGE, 4
             )
             if regs is not None:
-                soc = decode_u16(regs, 0)
+                snapshot["battery_voltage"] = decode_u16(regs, 0)
+                snapshot["battery_power"] = decode_i16(regs, 2)
+                soc = decode_u16(regs, 3)
                 if 0 <= soc <= 100:
                     snapshot["battery_soc"] = soc
                 else:
@@ -242,11 +278,6 @@ class VictronEssDriver(BatteryDriver):
                         "is correct for this GX device.",
                         soc,
                     )
-            regs = await self._client.async_read_holding_block(
-                self._system_unit_id, _REG_SYSTEM_BATTERY_POWER, 1
-            )
-            if regs is not None:
-                snapshot["battery_power"] = decode_i16(regs, 0)
 
         if requested is None or "ac_out_load" in requested:
             regs = await self._client.async_read_holding_block(

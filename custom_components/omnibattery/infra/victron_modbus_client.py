@@ -66,6 +66,21 @@ def encode_i16(value: int) -> int:
     return value & 0xFFFF
 
 
+def decode_ascii(regs: list[int]) -> Optional[str]:
+    """Decode a ``string[N]`` register run: 2 ASCII bytes per register, NUL-padded.
+
+    Same convention as Huawei's string registers (HuaweiModbusClient.decode_string)
+    — standard Modbus string packing, not yet confirmed against a real Victron
+    device since every other register this driver reads is numeric.
+    """
+    raw = bytearray()
+    for reg in regs:
+        raw.append((reg >> 8) & 0xFF)
+        raw.append(reg & 0xFF)
+    text = raw.split(b"\x00")[0].decode("ascii", "replace").strip()
+    return text or None
+
+
 class VictronModbusClient:
     """Thin async Modbus TCP transport shared across a GX device's unit ids.
 
