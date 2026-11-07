@@ -75,7 +75,8 @@ _HUB4_MODE_LABELS = {
 # Confirmed by Victron's own ESS Mode 2/3 documentation.
 _RAMP_LIMIT_W_PER_S = 400.0       # the Multi's own fixed ramp rate
 _HARDWARE_WATCHDOG_S = 60.0       # passthrough fallback after this long unwritten
-_SETPOINT_REFRESH_INTERVAL_S = 45.0  # rewrite margin ahead of the watchdog
+_SETPOINT_REFRESH_INTERVAL_S = 15.0  # rewrite margin ahead of the watchdog;
+# well under the 60s deadline so one dropped write still leaves room to retry
 _MIN_ACTUATOR_LATENCY_S = 2.0     # reasoned floor; not a measurement
 
 # How long a confirmed value may go without a fresh read before apply_setpoint
