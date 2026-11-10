@@ -1943,7 +1943,7 @@
         "name": "ESS AC Power Setpoint"
       },
       "ac_out_load": {
-        "name": "AC Output Load"
+        "name": "AC Output Power"
       },
       "ess_control_mode": {
         "name": "ESS Control Mode"

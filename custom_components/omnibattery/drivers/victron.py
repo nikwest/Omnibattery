@@ -2,20 +2,22 @@
 
 Controls the Multi through ESS "External control" (Hub-4 Mode 3). The
 register this driver writes (37, AcPowerSetpoint) targets AC-*input* power,
-not battery power, so every command is translated through the AC-out load
-the Multi is currently serving: ``AcPowerSetpoint = battery_power_wanted +
-ac_out_load``. See the register constants below for the full map, each
+not battery power, so every command is translated through the power the
+Multi currently passes on its AC-out: ``AcPowerSetpoint = battery_power_wanted
++ ac_out_power``. See the register constants below for the full map, each
 checked against ``attributes.csv`` from ``victronenergy/dbus_modbustcp``.
 
-Two refusals in ``apply_setpoint`` are deliberate, not missing error
-handling: it writes only once the AC-out load has been read at least once,
-and only once ``Hub4Mode`` is positively confirmed External control — an
-unreadable or unread check refuses exactly like a confirmed-wrong one. Both
-checks also expire: a value that stops refreshing (the register starts
-failing after having answered before) is treated the same as one that was
-never read at all once it is older than ``_HARDWARE_WATCHDOG_S`` — a stale
-"yes" must not outlive the same window the hardware itself uses to give up
-on an unwritten setpoint.
+The Multi holds the last written AC-in figure, not the battery intent behind
+it, so the translation has to follow the AC-out power as it moves: every
+fresh AC-out reading (``read_telemetry``, ~2 s) re-derives the register value
+for the held battery target and rewrites it when it changed. The same
+rewrite doubles as the keepalive for the Multi's 60 s setpoint watchdog.
+
+Two refusals are deliberate, not missing error handling: nothing is written
+until the AC-out power has a fresh reading, nor until ``Hub4Mode`` is
+positively confirmed External control — an unreadable or unread check
+refuses exactly like a confirmed-wrong one, and a confirmation that stops
+refreshing expires.
 
 Design history, the bugs this went through, and what remains unverified on
 real hardware are in the project guide page's technical notes
@@ -33,7 +35,6 @@ from ..infra.victron_modbus_client import (
     VictronModbusClient,
     decode_ascii,
     decode_i16,
-    decode_i32,
     decode_u16,
     encode_i16,
 )
@@ -51,16 +52,19 @@ _LOGGER = logging.getLogger(__name__)
 # victronenergy/dbus_modbustcp — the actual table the server is built from.
 
 # --- com.victronenergy.vebus (the Multiplus/Quattro itself) -----------------
+_REG_VEBUS_AC_OUT_L1_POWER = 23        # int16, 10 W per count (Ac/Out/L1/P),
+                                       # signed: negative when something on
+                                       # AC-out feeds back into the Multi
+_AC_OUT_POWER_W_PER_COUNT = 10
 _REG_VEBUS_AC_POWER_SETPOINT_L1 = 37   # int16, W, +import/-export (Hub4/L1/AcPowerSetpoint)
-_REG_VEBUS_AC_POWER_SETPOINT_L2 = 40   # int16, W (L2, three-phase — not written)
-_REG_VEBUS_AC_POWER_SETPOINT_L3 = 41   # int16, W (L3, three-phase — not written)
 _REG_VEBUS_DISABLE_CHARGE = 38         # uint16, 0/1 (Hub4/DisableCharge)
 _REG_VEBUS_DISABLE_FEEDIN = 39         # uint16, 0/1 (Hub4/DisableFeedIn)
-# 37/38/39 are marked write-only in attributes.csv; the server's read path
-# (verified against its source) applies no such check, so reading them back
-# for confirmation works.
+# 37/38/39 are contiguous and read back as one block. They are marked
+# write-only in attributes.csv; the server's read path (verified against its
+# source) applies no such check, so reading them back works.
+# L2/L3 setpoints (40/41) are not written: single-phase only.
 
-# --- com.victronenergy.system, unit id 100 (Victron's documented default) --
+# --- com.victronenergy.system / .settings, both unit id 100 by default ------
 _REG_SYSTEM_SERIAL = 800              # string[6] (12 bytes) — the GX device's
                                        # own serial, not a battery-pack serial;
                                        # there is no separate battery service
@@ -70,9 +74,6 @@ _REG_SYSTEM_BATTERY_VOLTAGE = 840     # uint16, V, scale 10 — first of 4
                                        # as one block below
 _REG_SYSTEM_BATTERY_POWER = 842       # int16, W, +charge/-discharge
 _REG_SYSTEM_BATTERY_SOC = 843         # uint16, 0-100%
-_REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1 = 878  # int32 (2 registers), W — AC-out
-                                                # load specifically, not the
-                                                # generic Ac/Consumption (817)
 _REG_SETTINGS_HUB4_MODE = 2902  # uint16; 3 = External control
 _HUB4_MODE_EXTERNAL_CONTROL = 3
 _HUB4_MODE_LABELS = {
@@ -83,21 +84,19 @@ _HUB4_MODE_LABELS = {
 # Confirmed by Victron's own ESS Mode 2/3 documentation.
 _RAMP_LIMIT_W_PER_S = 400.0       # the Multi's own fixed ramp rate
 _HARDWARE_WATCHDOG_S = 60.0       # passthrough fallback after this long unwritten
-_SETPOINT_REFRESH_INTERVAL_S = 15.0  # rewrite margin ahead of the watchdog;
+_SETPOINT_REFRESH_INTERVAL_S = 15.0  # rewrite an unchanged value this often;
 # well under the 60s deadline so one dropped write still leaves room to retry
 _MIN_ACTUATOR_LATENCY_S = 2.0     # reasoned floor; not a measurement
 
-# How long a confirmed value may go without a fresh read before apply_setpoint
-# treats it as unconfirmed again (see VictronEssDriver._is_fresh). Each needs
-# its own margin over its own polling cadence, not the Multi's watchdog
-# number: ac_out_load polls every ~2s, so _HARDWARE_WATCHDOG_S (60s) is ~30x
-# that and safely clear of ordinary jitter. ess_control_mode polls only every
-# ~30s — reusing the same 60s bound gave it just 2x margin, so a single
-# missed poll could push the gap past the threshold and trip the gate. That
-# is exactly what produced a write/passthrough/rewrite oscillation on real
-# hardware: the gate refuses, the Multi's own watchdog reverts to passthrough
-# within the same window, the next successful poll reopens the gate, repeat.
-_ESS_MODE_STALE_S = 150.0  # 5x its ~30s cadence
+# How long a value may go without a fresh read before it stops being trusted
+# (see VictronEssDriver._refusal). Each is ~5x its own polling cadence: wide
+# enough that one missed poll doesn't trip the gate (a 2x margin on
+# ess_control_mode did exactly that on real hardware, and the resulting
+# refuse/passthrough/rewrite cycle looked like power oscillation), tight
+# enough that the compensation never runs on an AC-out figure that is
+# seconds out of date.
+_AC_OUT_STALE_S = 10.0     # polled every ~2s
+_ESS_MODE_STALE_S = 150.0  # polled every ~30s
 
 _WRITE_CONTROLS = {
     "disable_charge": _REG_VEBUS_DISABLE_CHARGE,
@@ -118,7 +117,7 @@ SENSOR_DEFINITIONS: list[dict] = [
     {"key": "ac_power_setpoint", "name": "ESS AC Power Setpoint", "unit": "W",
      "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
      "category": "diagnostic", "scan_interval": "low", "enabled_by_default": True},
-    {"key": "ac_out_load", "name": "AC Output Load", "unit": "W",
+    {"key": "ac_out_load", "name": "AC Output Power", "unit": "W",
      "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
      "category": "diagnostic", "scan_interval": "high", "enabled_by_default": True},
     {"key": "ess_control_mode", "name": "ESS Control Mode", "data_type": "char",
@@ -157,16 +156,22 @@ class VictronEssDriver(BatteryDriver):
         self._system_unit_id = int(system_unit_id)
         self._client = client if client is not None else VictronModbusClient(host, port)
         self._shutting_down = False
-        # AC-out load, for the compensation formula, plus when it was last
-        # refreshed (monotonic). None until first read; apply_setpoint
-        # refuses to write while it is None or stale — see _is_fresh.
-        self._ac_out_load_w: Optional[float] = None
+        # AC-out power, for the compensation formula, plus when it was last
+        # refreshed (monotonic). None until first read.
+        self._ac_out_load_w: Optional[int] = None
         self._ac_out_load_monotonic = 0.0
         # Hub4Mode == 3, confirmed, plus when it was last refreshed.
-        # Fail-closed: apply_setpoint writes only when this is True *and*
-        # fresh; None, False, and stale-True all refuse.
+        # Fail-closed: None, False, and stale-True all refuse — see _refusal.
         self._ess_mode_confirmed_external: Optional[bool] = None
         self._ess_mode_monotonic = 0.0
+        # The battery power the controller last asked for. None until the
+        # first command and again after standby: nothing is written, and the
+        # Multi stays in (or falls back to) passthrough.
+        self._target_w: Optional[int] = None
+        # What register 37 was last told, and when — to skip a rewrite that
+        # would change nothing while still feeding the watchdog on time.
+        self._written_ac_in_w: Optional[int] = None
+        self._written_monotonic = 0.0
         # The GX device's own serial (register 800), read once on connect —
         # not polled telemetry. None until read; also keys the synthetic-
         # energy backup so a removed/re-added battery reclaims its totals.
@@ -199,10 +204,9 @@ class VictronEssDriver(BatteryDriver):
             setpoint_confirm_reliable=True,
             actuator_latency_s=actuator_latency_s,
             readback_latency_s=actuator_latency_s,
-            setpoint_refresh_interval_s=_SETPOINT_REFRESH_INTERVAL_S,
         )
         self._read_groups = [
-            # ac_out_load is fast, not "low": apply_setpoint needs it fresh.
+            # ac_out_load is fast, not "low": every setpoint is derived from it.
             ReadGroup("high", ("battery_soc", "battery_power", "battery_voltage", "ac_out_load")),
             ReadGroup("low", ("ac_power_setpoint", "disable_charge", "disable_feedin", "ess_control_mode")),
         ]
@@ -281,32 +285,26 @@ class VictronEssDriver(BatteryDriver):
 
         if requested is None or "ac_out_load" in requested:
             regs = await self._client.async_read_holding_block(
-                self._system_unit_id, _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1, 2
+                self._vebus_unit_id, _REG_VEBUS_AC_OUT_L1_POWER, 1
             )
             if regs is not None:
-                load = decode_i32(regs, 0)
+                load = decode_i16(regs, 0) * _AC_OUT_POWER_W_PER_COUNT
                 self._ac_out_load_w = load
                 self._ac_out_load_monotonic = asyncio.get_running_loop().time()
                 snapshot["ac_out_load"] = load
-            # A failed read keeps the last known value rather than clearing it
-            # to None, so one missed poll doesn't immediately refuse writes —
-            # but it also doesn't refresh the timestamp, so apply_setpoint's
-            # freshness check still catches a value that has gone stale.
+                await self._hold_target()
+            # A failed read keeps the last known value without refreshing the
+            # timestamp: one missed poll doesn't refuse writes, a value that
+            # has gone stale does.
 
-        if requested is None or "ac_power_setpoint" in requested:
+        if requested is None or {"ac_power_setpoint", "disable_charge", "disable_feedin"} & requested:
             regs = await self._client.async_read_holding_block(
-                self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, 1
+                self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, 3
             )
             if regs is not None:
                 snapshot["ac_power_setpoint"] = decode_i16(regs, 0)
-
-        if requested is None or {"disable_charge", "disable_feedin"} & requested:
-            regs = await self._client.async_read_holding_block(
-                self._vebus_unit_id, _REG_VEBUS_DISABLE_CHARGE, 2
-            )
-            if regs is not None:
-                snapshot["disable_charge"] = decode_u16(regs, 0)
-                snapshot["disable_feedin"] = decode_u16(regs, 1)
+                snapshot["disable_charge"] = decode_u16(regs, 1)
+                snapshot["disable_feedin"] = decode_u16(regs, 2)
 
         if requested is None or "ess_control_mode" in requested:
             regs = await self._client.async_read_holding_block(
@@ -319,9 +317,7 @@ class VictronEssDriver(BatteryDriver):
                 snapshot["ess_control_mode"] = _HUB4_MODE_LABELS.get(
                     mode, f"Unknown ESS mode ({mode})"
                 )
-            # A failed read keeps the last known value without refreshing the
-            # timestamp, so a confirmation that stops being renewed goes
-            # stale and apply_setpoint's freshness check refuses on it.
+            # Same failed-read rule as ac_out_load above.
 
         return snapshot
 
@@ -339,18 +335,65 @@ class VictronEssDriver(BatteryDriver):
         # battery_setpoint_w is the battery intent net_power_from_data reads.
         return {"ac_power_setpoint": ac_power_setpoint, "battery_setpoint_w": battery_setpoint_w}
 
-    @staticmethod
-    def _is_fresh(last_success_monotonic: float, max_age_s: float) -> bool:
-        """Whether a value refreshed at this monotonic time is still trusted.
+    def _clamp(self, net_power_w: int) -> int:
+        return max(
+            -self._capabilities.max_discharge_power_w,
+            min(self._capabilities.max_charge_power_w, int(net_power_w)),
+        )
 
-        Caps how long a cached "last known good" value may be relied on once
-        its register stops answering — otherwise a value that was confirmed
-        once but never updates again (reads silently failing) would be
-        trusted forever. ``max_age_s`` is the caller's own margin over its own
-        polling cadence, not a single shared number — see
-        ``_ESS_MODE_STALE_S`` for why that distinction matters.
+    def _refusal(self) -> Optional[str]:
+        """Why register 37 must not be written right now, or None if it may.
+
+        Fail-closed on both inputs: only a positively-confirmed *and fresh*
+        value passes. A cached "yes" that stopped being renewed (its register
+        went quiet after once answering) refuses exactly like one never read.
         """
-        return asyncio.get_running_loop().time() - last_success_monotonic <= max_age_s
+        now = asyncio.get_running_loop().time()
+        if (
+            self._ess_mode_confirmed_external is not True
+            or now - self._ess_mode_monotonic > _ESS_MODE_STALE_S
+        ):
+            return "ess_mode_not_confirmed_external"
+        if (
+            self._ac_out_load_w is None
+            or now - self._ac_out_load_monotonic > _AC_OUT_STALE_S
+        ):
+            # No safe way to translate battery power into the AC-in register
+            # without a fresh AC-out reading. Refuse rather than guess.
+            return "consumption_unavailable"
+        return None
+
+    def _ac_in_target(self, battery_w: int) -> int:
+        # Round-tripped through the register's own int16 clamp, so a readback
+        # is compared against what the hardware can actually echo.
+        return decode_i16([encode_i16(battery_w + self._ac_out_load_w)])
+
+    async def _write_ac_in(self, ac_in_w: int) -> bool:
+        ok = await self._client.async_write_registers(
+            self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(ac_in_w)]
+        )
+        if ok:
+            self._written_ac_in_w = ac_in_w
+            self._written_monotonic = asyncio.get_running_loop().time()
+        return ok
+
+    async def _hold_target(self) -> None:
+        """Keep the held battery target true against a fresh AC-out reading.
+
+        Called from the telemetry poll right after AC-out power was read. The
+        Multi only remembers the AC-in figure, so whenever AC-out moves the
+        battery silently absorbs the difference until that figure is
+        re-derived — and an unchanged figure still has to be rewritten ahead
+        of the 60 s watchdog. Living here rather than in the controller means
+        neither depends on the controller having a reason to call in.
+        """
+        if self._target_w is None or self._shutting_down or self._refusal() is not None:
+            return
+        ac_in_w = self._ac_in_target(self._clamp(self._target_w))
+        age_s = asyncio.get_running_loop().time() - self._written_monotonic
+        if ac_in_w == self._written_ac_in_w and age_s < _SETPOINT_REFRESH_INTERVAL_S:
+            return
+        await self._write_ac_in(ac_in_w)
 
     async def apply_setpoint(
         self,
@@ -359,39 +402,21 @@ class VictronEssDriver(BatteryDriver):
         mode_hint: Optional[str] = None,
         read_back: bool = True,
     ) -> SetpointResult:
-        applied = max(
-            -self._capabilities.max_discharge_power_w,
-            min(self._capabilities.max_charge_power_w, int(net_power_w)),
-        )
+        applied = self._clamp(net_power_w)
+        # Held even when the write below is refused or fails: it is still
+        # what the controller wants, and _hold_target applies it as soon as
+        # the gate reopens.
+        self._target_w = applied
 
-        if self._ess_mode_confirmed_external is not True or not self._is_fresh(
-            self._ess_mode_monotonic, _ESS_MODE_STALE_S
-        ):
-            # Fail-closed: only a positively-confirmed *and fresh* True
-            # proceeds — a stale True (the register stopped answering after
-            # once confirming) refuses exactly like an outright False.
+        failure_reason = self._refusal()
+        if failure_reason is not None:
             return SetpointResult(
                 ok=False, net_power_w=applied, confirmed=False,
-                failure_reason="ess_mode_not_confirmed_external",
-            )
-        if self._ac_out_load_w is None or not self._is_fresh(
-            self._ac_out_load_monotonic, _HARDWARE_WATCHDOG_S
-        ):
-            # No safe way to translate battery power into the grid-point
-            # register without a fresh reading. Refuse rather than guess.
-            return SetpointResult(
-                ok=False, net_power_w=applied, confirmed=False,
-                failure_reason="consumption_unavailable",
+                failure_reason=failure_reason,
             )
 
-        # Round-tripped through the register's own int16 clamp, so the
-        # comparison below is against what the hardware can actually echo.
-        ac_in_target = decode_i16([encode_i16(applied + round(self._ac_out_load_w))])
-
-        ok = await self._client.async_write_registers(
-            self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(ac_in_target)]
-        )
-        if not ok:
+        ac_in_target = self._ac_in_target(applied)
+        if not await self._write_ac_in(ac_in_target):
             return SetpointResult(
                 ok=False, net_power_w=applied, confirmed=False, failure_reason="write_failed"
             )
@@ -467,6 +492,7 @@ class VictronEssDriver(BatteryDriver):
         state than just waiting out the watchdog. BatteryLife stays disabled
         until ESS Mode is switched back by hand, independent of this call.
         """
+        self._target_w = None
         _LOGGER.info(
             "Victron driver: standby — no further AcPowerSetpoint writes will be "
             "issued; the Multi returns to passthrough within %.0fs on its own",

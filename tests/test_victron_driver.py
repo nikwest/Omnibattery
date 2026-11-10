@@ -17,11 +17,13 @@ import pytest
 
 from custom_components.omnibattery.drivers import DriverCapabilities, VictronEssDriver
 from custom_components.omnibattery.drivers.victron import (
+    _AC_OUT_STALE_S,
     _ESS_MODE_STALE_S,
     _HARDWARE_WATCHDOG_S,
     _HUB4_MODE_EXTERNAL_CONTROL,
     _REG_SETTINGS_HUB4_MODE,
-    _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1,
+    _REG_VEBUS_AC_OUT_L1_POWER,
+    _SETPOINT_REFRESH_INTERVAL_S,
     _REG_SYSTEM_BATTERY_POWER,
     _REG_SYSTEM_BATTERY_SOC,
     _REG_SYSTEM_BATTERY_VOLTAGE,
@@ -32,7 +34,6 @@ from custom_components.omnibattery.drivers.victron import (
 from custom_components.omnibattery.infra.victron_modbus_client import (
     decode_ascii,
     decode_i16,
-    decode_i32,
     decode_u16,
     encode_i16,
 )
@@ -121,12 +122,10 @@ def test_capabilities_static_fields():
     assert caps.max_discharge_power_w == 5000
 
 
-def test_capabilities_declares_the_ess_watchdog_refresh():
-    """The 60s hardware watchdog is Victron-specific; every other driver's
-    capability stays None and must be unaffected by this one existing."""
-    caps = _driver().capabilities
-    assert caps.setpoint_refresh_interval_s is not None
-    assert caps.setpoint_refresh_interval_s < 60.0
+def test_keepalive_interval_leaves_room_under_the_hardware_watchdog():
+    """One dropped rewrite must still leave time for the next before the
+    Multi gives up on the setpoint."""
+    assert _SETPOINT_REFRESH_INTERVAL_S * 2 < _HARDWARE_WATCHDOG_S
 
 
 def test_actuator_latency_scales_with_configured_power():
@@ -195,33 +194,43 @@ async def test_read_telemetry_omits_keys_on_failed_block():
 
 
 @pytest.mark.asyncio
-async def test_read_telemetry_disable_flags():
-    client = _fake_client()
-    client.async_read_holding_block = AsyncMock(
-        side_effect=lambda unit_id, start, count: [1, 0] if start == _REG_VEBUS_DISABLE_CHARGE else None
-    )
-    driver = _driver(client=client)
-
-    data = await driver.read_telemetry(["disable_charge", "disable_feedin"])
-    assert data["disable_charge"] == 1
-    assert data["disable_feedin"] == 0
-
-
-@pytest.mark.asyncio
-async def test_read_telemetry_tracks_ac_out_load_for_apply_setpoint():
-    """Register 878 is int32 — two registers, not the uint16/one-register
-    shape of the wrong register (817) an earlier version used."""
+async def test_read_telemetry_reads_setpoint_and_disable_flags_as_one_block():
+    """37/38/39 are contiguous on the vebus unit: one request, not two."""
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            [0, 1800] if start == _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1 else None
+            [encode_i16(-700), 1, 0]
+            if (unit_id, start, count) == (227, _REG_VEBUS_AC_POWER_SETPOINT_L1, 3)
+            else None
+        )
+    )
+    driver = _driver(client=client)
+
+    data = await driver.read_telemetry(["ac_power_setpoint", "disable_charge", "disable_feedin"])
+    assert data == {"ac_power_setpoint": -700, "disable_charge": 1, "disable_feedin": 0}
+    client.async_read_holding_block.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw, expected_w", [(180, 1800), (encode_i16(-60), -600)])
+@pytest.mark.asyncio
+async def test_read_telemetry_tracks_ac_out_power_for_the_compensation(raw, expected_w):
+    """The Multi's own AC-out measurement (vebus register 23, 10 W per
+    count), signed: a source on AC-out feeding back reads negative. The
+    system aggregate an earlier version used (878) clamps that case to zero
+    and also counts load that AC-coupled PV serves, so it is not what the
+    Multi itself passes."""
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            [raw] if (unit_id, start) == (227, _REG_VEBUS_AC_OUT_L1_POWER) else None
         )
     )
     driver = _driver(client=client, consumption=None)
 
     data = await driver.read_telemetry(["ac_out_load"])
-    assert data["ac_out_load"] == 1800
-    assert driver._ac_out_load_w == 1800
+    assert data["ac_out_load"] == expected_w
+    assert driver._ac_out_load_w == expected_w
 
 
 @pytest.mark.parametrize(
@@ -340,11 +349,11 @@ async def test_apply_setpoint_proceeds_only_when_positively_confirmed_external()
 async def test_apply_setpoint_refuses_when_ess_mode_confirmation_is_stale():
     """A True that stopped being refreshed must not be trusted forever: once
     the register has gone unanswered for longer than its own staleness
-    margin, a cached 'yes' is as good as no confirmation at all. This uses
-    its own constant (not _HARDWARE_WATCHDOG_S) because ess_control_mode
-    polls on a slower ~30s cadence than ac_out_load's ~2s — reusing the same
-    60s bound here gave only 2x margin and tripped on a single missed poll,
-    producing a write/passthrough/rewrite oscillation on real hardware."""
+    margin, a cached 'yes' is as good as no confirmation at all. Each gate
+    has its own margin because ess_control_mode polls on a slower ~30s
+    cadence than ac_out_load's ~2s — a shared 60s bound gave this one only
+    2x margin and tripped on a single missed poll, producing a
+    write/passthrough/rewrite oscillation on real hardware."""
     client = _fake_client()
     driver = _driver(
         client=client, consumption=0, ess_mode_external=True,
@@ -363,7 +372,7 @@ async def test_apply_setpoint_refuses_when_ac_out_load_is_stale():
     client = _fake_client()
     driver = _driver(
         client=client, consumption=2000,
-        consumption_age_s=_HARDWARE_WATCHDOG_S + 1,
+        consumption_age_s=_AC_OUT_STALE_S + 1,
     )
 
     result = await driver.apply_setpoint(500)
@@ -380,7 +389,7 @@ async def test_read_telemetry_refreshes_the_freshness_timestamps():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            [0, 1800] if start == _REG_SYSTEM_AC_CONSUMPTION_ON_OUTPUT_L1
+            [180] if start == _REG_VEBUS_AC_OUT_L1_POWER
             else [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE
             else None
         )
@@ -462,6 +471,116 @@ async def test_apply_setpoint_unconfirmed_when_readback_fails():
     assert result.ok is True
     assert result.confirmed is False
     assert result.battery_power_w is None
+
+
+# ----------------------------------------------------------------------
+# holding the target between controller commands
+# ----------------------------------------------------------------------
+
+def _ac_out_client(raw_ac_out):
+    """A client whose AC-out register answers ``raw_ac_out`` (10 W counts)."""
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            [encode_i16(raw_ac_out)] if start == _REG_VEBUS_AC_OUT_L1_POWER else None
+        )
+    )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_poll_does_not_write_before_the_first_command():
+    """A restart must leave the Multi alone until the controller speaks."""
+    client = _ac_out_client(50)
+    driver = _driver(client=client)
+
+    await driver.read_telemetry(["ac_out_load"])
+
+    client.async_write_registers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_rewrites_the_setpoint_when_ac_out_power_moves():
+    """The Multi holds the AC-in figure, not the battery intent: when AC-out
+    moves and nothing rewrites it, the battery silently covers the
+    difference. A 0 W target must stay 0 W at the battery."""
+    client = _ac_out_client(120)  # AC-out now 1200 W
+    driver = _driver(client=client, consumption=400)
+    await driver.apply_setpoint(0, read_back=False)  # written as 400
+    client.async_write_registers.reset_mock()
+
+    await driver.read_telemetry(["ac_out_load"])
+
+    client.async_write_registers.assert_awaited_once_with(
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(1200)]
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_skips_an_unchanged_setpoint_until_the_keepalive_is_due():
+    client = _ac_out_client(40)
+    driver = _driver(client=client, consumption=400)
+    await driver.apply_setpoint(-300, read_back=False)
+    client.async_write_registers.reset_mock()
+
+    await driver.read_telemetry(["ac_out_load"])
+    client.async_write_registers.assert_not_awaited()
+
+    driver._written_monotonic -= _SETPOINT_REFRESH_INTERVAL_S + 1
+    await driver.read_telemetry(["ac_out_load"])
+    client.async_write_registers.assert_awaited_once_with(
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(100)]
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_applies_a_refused_command_once_the_gate_reopens():
+    client = _ac_out_client(40)
+    driver = _driver(client=client, consumption=None)
+    refused = await driver.apply_setpoint(500)
+    assert refused.ok is False
+    client.async_write_registers.assert_not_awaited()
+
+    await driver.read_telemetry(["ac_out_load"])
+
+    client.async_write_registers.assert_awaited_once_with(
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(900)]
+    )
+
+
+@pytest.mark.parametrize("blocker", ["ess_mode", "shutting_down", "standby"])
+@pytest.mark.asyncio
+async def test_poll_does_not_write_when_it_must_not(blocker):
+    client = _ac_out_client(120)
+    driver = _driver(client=client, consumption=400)
+    await driver.apply_setpoint(0, read_back=False)
+    client.async_write_registers.reset_mock()
+
+    if blocker == "ess_mode":
+        driver._ess_mode_confirmed_external = False
+    elif blocker == "shutting_down":
+        driver.set_shutting_down(True)
+    else:
+        await driver.standby()
+
+    await driver.read_telemetry(["ac_out_load"])
+
+    client.async_write_registers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_does_not_write_when_the_ac_out_read_fails():
+    """No fresh reading, no rewrite: the compensation must never run on a
+    figure the poll just failed to refresh."""
+    client = _fake_client()
+    driver = _driver(client=client, consumption=400)
+    await driver.apply_setpoint(0, read_back=False)
+    client.async_write_registers.reset_mock()
+    driver._written_monotonic -= _SETPOINT_REFRESH_INTERVAL_S + 1
+
+    await driver.read_telemetry(["ac_out_load"])
+
+    client.async_write_registers.assert_not_awaited()
 
 
 def test_net_power_from_data():

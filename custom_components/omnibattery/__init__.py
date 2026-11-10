@@ -6921,12 +6921,6 @@ class ChargeDischargeController:
             readback_latency_s <= HOT_PATH_READBACK_MAX_LATENCY_S
         )
         current_net = coordinator.driver.net_power_from_data(data)
-        # A driver declaring setpoint_refresh_interval_s (Victron's ESS
-        # external-control watchdog) gets its periodic rewrite from the
-        # coordinator's own poll cycle (_async_update_data_impl), not from
-        # here: this function only runs when the fleet controller has
-        # something to (re)assert, and a long deadband/blocked stretch can
-        # leave a coordinator un-visited for well over the watchdog window.
         if not force_write and current_net is not None and current_net == net_power:
             skip_write = True
             if net_power == 0:

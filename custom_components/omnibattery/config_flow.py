@@ -643,27 +643,36 @@ def _hoymiles_capacity_default(battery_data: dict) -> float:
     return 2.24
 
 
-def _victron_connection_schema(battery_num: int) -> vol.Schema:
-    """Shared form for the add-battery and add-additional-battery flows."""
+def _victron_connection_schema(battery_num: int, saved: dict | None = None) -> vol.Schema:
+    """Shared form for the setup and options flows; ``saved`` pre-fills an edit."""
+    saved = saved or {}
+    unit_id = vol.All(
+        NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)),
+        vol.Coerce(int),
+    )
+    power = NumberSelector(
+        NumberSelectorConfig(min=100, max=_VICTRON_MAX_POWER_W, step=50, unit_of_measurement="W", mode=NumberSelectorMode.BOX)
+    )
+    # No default for the vebus unit id on a new battery: it is not guessable.
+    vebus_key = (
+        vol.Required("victron_vebus_unit_id", default=saved["victron_vebus_unit_id"])
+        if "victron_vebus_unit_id" in saved else vol.Required("victron_vebus_unit_id")
+    )
+    host_key = (
+        vol.Required(CONF_HOST, default=saved[CONF_HOST])
+        if saved.get(CONF_HOST) else vol.Required(CONF_HOST)
+    )
     return vol.Schema(
         {
-            vol.Required(CONF_NAME, default=f"Victron ESS {battery_num}"): str,
-            vol.Required(CONF_HOST): str,
-            vol.Optional(CONF_PORT, default=502): int,
-            vol.Required("victron_vebus_unit_id"): vol.All(
-                NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)),
-                vol.Coerce(int),
+            vol.Required(CONF_NAME, default=saved.get(CONF_NAME, f"Victron ESS {battery_num}")): str,
+            host_key: str,
+            vol.Optional(CONF_PORT, default=saved.get(CONF_PORT, 502)): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=65535)
             ),
-            vol.Required("victron_system_unit_id", default=100): vol.All(
-                NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)),
-                vol.Coerce(int),
-            ),
-            vol.Required("max_charge_power", default=5000): NumberSelector(
-                NumberSelectorConfig(min=100, max=_VICTRON_MAX_POWER_W, step=50, unit_of_measurement="W", mode=NumberSelectorMode.BOX)
-            ),
-            vol.Required("max_discharge_power", default=5000): NumberSelector(
-                NumberSelectorConfig(min=100, max=_VICTRON_MAX_POWER_W, step=50, unit_of_measurement="W", mode=NumberSelectorMode.BOX)
-            ),
+            vebus_key: unit_id,
+            vol.Required("victron_system_unit_id", default=saved.get("victron_system_unit_id", 100)): unit_id,
+            vol.Required("max_charge_power", default=saved.get("max_charge_power", 5000)): power,
+            vol.Required("max_discharge_power", default=saved.get("max_discharge_power", 5000)): power,
         }
     )
 
@@ -4844,50 +4853,17 @@ class OptionsFlowHandler(OptionsFlow):
                     })
                     return await self.async_step_battery_limits()
 
-            if self.battery_index < len(current_batteries):
-                current_battery = current_batteries[self.battery_index]
-                defaults = {
-                    CONF_NAME: current_battery.get(CONF_NAME, f"Victron ESS {battery_num}"),
-                    CONF_HOST: current_battery.get(CONF_HOST, ""),
-                    CONF_PORT: current_battery.get(CONF_PORT, 502),
-                    "victron_vebus_unit_id": current_battery.get("victron_vebus_unit_id", 0),
-                    "victron_system_unit_id": current_battery.get("victron_system_unit_id", 100),
-                    "max_charge_power": current_battery.get("max_charge_power", 5000),
-                    "max_discharge_power": current_battery.get("max_discharge_power", 5000),
-                }
-            else:
-                defaults = {
-                    CONF_NAME: f"Victron ESS {battery_num}",
-                    CONF_HOST: "",
-                    CONF_PORT: 502,
-                    "victron_vebus_unit_id": 0,
-                    "victron_system_unit_id": 100,
-                    "max_charge_power": 5000,
-                    "max_discharge_power": 5000,
-                }
+            saved = (
+                current_batteries[self.battery_index]
+                if self.battery_index < len(current_batteries) else None
+            )
         except Exception as e:
             _LOGGER.error("Error in options flow battery_connection_victron step: %s", e, exc_info=True)
             return self.async_abort(reason="unknown_error")
 
         return self.async_show_form(
             step_id="battery_connection_victron",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_NAME, default=defaults[CONF_NAME]): str,
-                    vol.Required(CONF_HOST, default=defaults[CONF_HOST]): str,
-                    vol.Optional(CONF_PORT, default=defaults[CONF_PORT]): int,
-                    vol.Required("victron_vebus_unit_id", default=defaults["victron_vebus_unit_id"]):
-                        vol.All(NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
-                    vol.Required("victron_system_unit_id", default=defaults["victron_system_unit_id"]):
-                        vol.All(NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
-                    vol.Required("max_charge_power", default=defaults["max_charge_power"]): NumberSelector(
-                        NumberSelectorConfig(min=100, max=_VICTRON_MAX_POWER_W, step=50, unit_of_measurement="W", mode=NumberSelectorMode.BOX)
-                    ),
-                    vol.Required("max_discharge_power", default=defaults["max_discharge_power"]): NumberSelector(
-                        NumberSelectorConfig(min=100, max=_VICTRON_MAX_POWER_W, step=50, unit_of_measurement="W", mode=NumberSelectorMode.BOX)
-                    ),
-                }
-            ),
+            data_schema=_victron_connection_schema(battery_num, saved),
             errors=errors,
             description_placeholders={"battery_num": str(battery_num)},
         )

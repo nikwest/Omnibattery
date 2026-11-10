@@ -51,15 +51,6 @@ def decode_i16(regs: list[int], offset: int = 0) -> int:
     return value - 0x10000 if value >= 0x8000 else value
 
 
-def decode_u32(regs: list[int], offset: int = 0) -> int:
-    return ((regs[offset] & 0xFFFF) << 16) | (regs[offset + 1] & 0xFFFF)
-
-
-def decode_i32(regs: list[int], offset: int = 0) -> int:
-    value = decode_u32(regs, offset)
-    return value - 0x100000000 if value >= 0x80000000 else value
-
-
 def encode_i16(value: int) -> int:
     """Pack a signed value into one 16-bit Modbus register word."""
     value = max(-0x8000, min(0x7FFF, int(value)))
