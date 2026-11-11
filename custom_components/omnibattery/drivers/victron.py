@@ -84,8 +84,18 @@ _HUB4_MODE_LABELS = {
 # Confirmed by Victron's own ESS Mode 2/3 documentation.
 _RAMP_LIMIT_W_PER_S = 400.0       # the Multi's own fixed ramp rate
 _HARDWARE_WATCHDOG_S = 60.0       # passthrough fallback after this long unwritten
-_SETPOINT_REFRESH_INTERVAL_S = 15.0  # rewrite an unchanged value this often;
-# well under the 60s deadline so one dropped write still leaves room to retry
+# Rewrite an unchanged value this often. Victron documents 60s, but on real
+# hardware (Multiplus-II 48/3000, External control) the Multi dipped to
+# passthrough for 2-3s whenever ~15s passed without a write — every dip in a
+# 3-minute capture followed a 15-16s gap, none a shorter one. Each dip reads
+# as battery power ~0, which the fleet controller then acts on (non-delivery
+# strikes, discharge trimmed), so stay well inside it.
+_SETPOINT_REFRESH_INTERVAL_S = 5.0
+# AC-out changes smaller than this don't trigger a rewrite on their own: the
+# reading has 10 W resolution and wanders +/-10 W with nothing connected, and
+# chasing that only puts the noise into the setpoint. The periodic rewrite
+# above still picks up the current value.
+_AC_OUT_REWRITE_THRESHOLD_W = 20
 _MIN_ACTUATOR_LATENCY_S = 2.0     # reasoned floor; not a measurement
 # How long the command must have stayed at 0 W before the battery is locked
 # idle (see _is_idle). The driver is not told whether the controller is
@@ -450,7 +460,11 @@ class VictronEssDriver(BatteryDriver):
         await self._sync_disable_flags(self._is_idle())
         ac_in_w = self._ac_in_target(target_w)
         age_s = asyncio.get_running_loop().time() - self._written_monotonic
-        if ac_in_w == self._written_ac_in_w and age_s < _SETPOINT_REFRESH_INTERVAL_S:
+        if (
+            self._written_ac_in_w is not None
+            and abs(ac_in_w - self._written_ac_in_w) < _AC_OUT_REWRITE_THRESHOLD_W
+            and age_s < _SETPOINT_REFRESH_INTERVAL_S
+        ):
             return
         await self._write_ac_in(ac_in_w)
 

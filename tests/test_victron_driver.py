@@ -524,6 +524,20 @@ async def test_poll_rewrites_the_setpoint_when_ac_out_power_moves():
 
 
 @pytest.mark.asyncio
+async def test_poll_ignores_ac_out_noise_below_the_rewrite_threshold():
+    """The AC-out reading wanders +/-10 W with nothing connected; chasing it
+    only puts that noise into the setpoint."""
+    client = _ac_out_client(41)  # 410 W: one 10 W step away from what was used
+    driver = _driver(client=client, consumption=400)
+    await driver.apply_setpoint(-300, read_back=False)
+    client.async_write_registers.reset_mock()
+
+    await driver.read_telemetry(["ac_out_load"])
+
+    client.async_write_registers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_poll_skips_an_unchanged_setpoint_until_the_keepalive_is_due():
     client = _ac_out_client(40)
     driver = _driver(client=client, consumption=400)
