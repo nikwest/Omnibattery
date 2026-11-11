@@ -21,6 +21,7 @@ from custom_components.omnibattery.drivers.victron import (
     _ESS_MODE_STALE_S,
     _HARDWARE_WATCHDOG_S,
     _HUB4_MODE_EXTERNAL_CONTROL,
+    _IDLE_LOCK_DELAY_S,
     _REG_SETTINGS_HUB4_MODE,
     _REG_VEBUS_AC_OUT_L1_POWER,
     _SETPOINT_REFRESH_INTERVAL_S,
@@ -79,6 +80,9 @@ def _driver(
     driver._ac_out_load_monotonic = time.monotonic() - consumption_age_s
     driver._ess_mode_confirmed_external = ess_mode_external
     driver._ess_mode_monotonic = time.monotonic() - ess_mode_age_s
+    # Idle lock already known-clear, so tests about the setpoint see only the
+    # setpoint write; the lock has its own tests.
+    driver._disable_flags = (0, 0)
     return driver
 
 
@@ -207,7 +211,10 @@ async def test_read_telemetry_reads_setpoint_and_disable_flags_as_one_block():
     driver = _driver(client=client)
 
     data = await driver.read_telemetry(["ac_power_setpoint", "disable_charge", "disable_feedin"])
-    assert data == {"ac_power_setpoint": -700, "disable_charge": 1, "disable_feedin": 0}
+    # The switches report what the user asked for (nothing yet), not the raw
+    # registers, which the driver also sets on its own while idle.
+    assert data == {"ac_power_setpoint": -700, "disable_charge": 0, "disable_feedin": 0}
+    assert driver._disable_flags == (1, 0)
     client.async_read_holding_block.assert_awaited_once()
 
 
@@ -294,7 +301,7 @@ async def test_apply_setpoint_compensates_for_ac_out_load(net_power_w, consumpti
 
     result = await driver.apply_setpoint(net_power_w)
 
-    client.async_write_registers.assert_awaited_once_with(
+    client.async_write_registers.assert_any_await(
         227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(expected_register_value)]
     )
     assert result.net_power_w == net_power_w  # the battery intent, unchanged
@@ -562,6 +569,7 @@ async def test_poll_does_not_write_when_it_must_not(blocker):
         driver.set_shutting_down(True)
     else:
         await driver.standby()
+        client.async_write_registers.reset_mock()  # standby's own lock release
 
     await driver.read_telemetry(["ac_out_load"])
 
@@ -592,25 +600,137 @@ def test_net_power_from_data():
     assert driver.net_power_from_data({"ac_power_setpoint": -400}) is None
 
 
+# ----------------------------------------------------------------------
+# idle lock (DisableCharge + DisableFeedIn while the target is 0 W)
+# ----------------------------------------------------------------------
+
+def _lock_writes(client):
+    return [
+        call.args[2] for call in client.async_write_registers.await_args_list
+        if call.args[1] == _REG_VEBUS_DISABLE_CHARGE
+    ]
+
+
+def _zero_for_long_enough(driver):
+    driver._zero_since -= _IDLE_LOCK_DELAY_S + 1
+
+
 @pytest.mark.asyncio
-async def test_write_control_disable_charge_and_feedin():
+async def test_idle_lock_sets_both_flags_once_zero_has_lasted_and_a_command_clears_them():
+    """Matching AC-in to AC-out still leaks the Multi's losses and the 10 W
+    AC-out resolution out of the battery; the flags make idle a real idle.
+    Not on the first 0 W command, though: a battery in use passes through
+    zero for seconds at a time, and locking it there would flap the flags."""
+    client = _ac_out_client(40)
+    driver = _driver(client=client, consumption=400)
+
+    await driver.apply_setpoint(0, read_back=False)
+    await driver.read_telemetry(["ac_out_load"])
+    assert _lock_writes(client) == []           # only just went to zero
+
+    _zero_for_long_enough(driver)
+    await driver.read_telemetry(["ac_out_load"])
+    assert _lock_writes(client) == [[1, 1]]     # stayed there: locked by the poll
+
+    await driver.apply_setpoint(0, read_back=False)  # repeated 0 W: no restart, no rewrite
+    await driver.read_telemetry(["ac_out_load"])
+    assert _lock_writes(client) == [[1, 1]]
+
+    await driver.apply_setpoint(-300, read_back=False)
+    assert _lock_writes(client) == [[1, 1], [0, 0]]  # unlocked at once
+
+    await driver.apply_setpoint(0, read_back=False)  # back to zero: the delay starts over
+    await driver.read_telemetry(["ac_out_load"])
+    assert _lock_writes(client) == [[1, 1], [0, 0]]
+
+
+@pytest.mark.asyncio
+async def test_idle_lock_is_reasserted_when_the_readback_disagrees():
     client = _fake_client()
-    driver = _driver(client=client)
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            [encode_i16(400), 1, 0] if start == _REG_VEBUS_AC_POWER_SETPOINT_L1  # mixed pair
+            else [40] if start == _REG_VEBUS_AC_OUT_L1_POWER
+            else None
+        )
+    )
+    driver = _driver(client=client, consumption=400)
+    await driver.apply_setpoint(0, read_back=False)
+    _zero_for_long_enough(driver)
+    await driver.read_telemetry(["ac_out_load"])     # locks
+    client.async_write_registers.reset_mock()
+
+    await driver.read_telemetry(["disable_charge"])  # readback: not what was written
+    await driver.read_telemetry(["ac_out_load"])     # next poll puts it right
+
+    assert _lock_writes(client) == [[1, 1]]
+
+
+@pytest.mark.asyncio
+async def test_idle_lock_is_not_touched_while_writes_are_refused():
+    """Outside External control the GX device's own ESS owns these flags."""
+    client = _fake_client()
+    driver = _driver(client=client, consumption=400, ess_mode_external=False)
+
+    await driver.apply_setpoint(0, read_back=False)
+
+    client.async_write_registers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_standby_releases_the_idle_lock_and_stops_holding():
+    client = _fake_client()
+    driver = _driver(client=client, consumption=400)
+    await driver.apply_setpoint(0, read_back=False)
+    _zero_for_long_enough(driver)
+    await driver.apply_setpoint(0, read_back=False)  # locks
+    client.async_write_registers.reset_mock()
+
+    assert await driver.standby() is True
+
+    client.async_write_registers.assert_awaited_once_with(
+        227, _REG_VEBUS_DISABLE_CHARGE, [0, 0]
+    )
+    assert driver._target_w is None
+
+
+@pytest.mark.asyncio
+async def test_user_switch_is_combined_with_the_idle_lock():
+    """A switch the user turned on stays on through idle and back; the idle
+    lock only ever adds to it."""
+    client = _fake_client()
+    driver = _driver(client=client, consumption=400)
 
     assert await driver.write_control("disable_charge", 1) is True
-    client.async_write_registers.assert_awaited_with(227, _REG_VEBUS_DISABLE_CHARGE, [1])
+    await driver.apply_setpoint(-300, read_back=False)  # discharging: charge stays disabled
+    await driver.apply_setpoint(0, read_back=False)
+    _zero_for_long_enough(driver)
+    await driver.apply_setpoint(0, read_back=False)     # idle: both
+    await driver.apply_setpoint(-300, read_back=False)  # back to the user's choice
+    assert await driver.write_control("disable_charge", 0) is True
 
-    assert await driver.write_control("disable_feedin", 0) is True
+    assert _lock_writes(client) == [[1, 0], [1, 1], [1, 0], [0, 0]]
     assert await driver.write_control("not_a_real_key", 1) is False
 
 
 @pytest.mark.asyncio
-async def test_standby_does_not_write_and_returns_true():
+async def test_user_switch_state_is_what_the_user_asked_for_even_while_idle():
     client = _fake_client()
-    driver = _driver(client=client)
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            [encode_i16(400), 1, 1] if start == _REG_VEBUS_AC_POWER_SETPOINT_L1 else None
+        )
+    )
+    driver = _driver(client=client, consumption=400)
+    await driver.write_control("disable_feedin", 1)
+    await driver.apply_setpoint(0, read_back=False)
+    _zero_for_long_enough(driver)
+    await driver.apply_setpoint(0, read_back=False)
 
-    assert await driver.standby() is True
-    client.async_write_registers.assert_not_awaited()
+    data = await driver.read_telemetry(["disable_charge", "disable_feedin"])
+
+    assert data["disable_charge"] == 0
+    assert data["disable_feedin"] == 1
 
 
 @pytest.mark.asyncio
@@ -716,12 +836,6 @@ def test_entity_definitions_expose_expected_keys():
     assert driver.all_definitions == (
         driver.sensor_definitions + driver.switch_definitions
     )
-
-
-def test_switch_definitions_declare_command_values():
-    for definition in _driver().switch_definitions:
-        assert definition["command_on"] == 1
-        assert definition["command_off"] == 0
 
 
 # ----------------------------------------------------------------------

@@ -87,6 +87,11 @@ _HARDWARE_WATCHDOG_S = 60.0       # passthrough fallback after this long unwritt
 _SETPOINT_REFRESH_INTERVAL_S = 15.0  # rewrite an unchanged value this often;
 # well under the 60s deadline so one dropped write still leaves room to retry
 _MIN_ACTUATOR_LATENCY_S = 2.0     # reasoned floor; not a measurement
+# How long the command must have stayed at 0 W before the battery is locked
+# idle (see _is_idle). The driver is not told whether the controller is
+# using this battery; a battery in use passes through zero for seconds at a
+# time, one that was handed off stays there.
+_IDLE_LOCK_DELAY_S = 30.0
 
 # How long a value may go without a fresh read before it stops being trusted
 # (see VictronEssDriver._refusal). Each is ~5x its own polling cadence: wide
@@ -97,11 +102,6 @@ _MIN_ACTUATOR_LATENCY_S = 2.0     # reasoned floor; not a measurement
 # seconds out of date.
 _AC_OUT_STALE_S = 10.0     # polled every ~2s
 _ESS_MODE_STALE_S = 150.0  # polled every ~30s
-
-_WRITE_CONTROLS = {
-    "disable_charge": _REG_VEBUS_DISABLE_CHARGE,
-    "disable_feedin": _REG_VEBUS_DISABLE_FEEDIN,
-}
 
 SENSOR_DEFINITIONS: list[dict] = [
     {"key": "battery_soc", "name": "Battery SOC", "unit": "%", "device_class": "battery",
@@ -126,6 +126,8 @@ SENSOR_DEFINITIONS: list[dict] = [
 ]
 NUMBER_DEFINITIONS: list[dict] = []
 SELECT_DEFINITIONS: list[dict] = []
+# The switches show what the user asked for, not the raw registers: the
+# driver additionally sets both flags while idle (see _sync_disable_flags).
 SWITCH_DEFINITIONS: list[dict] = [
     {"key": "disable_charge", "name": "ESS Disable Charge", "icon": "mdi:battery-charging-off",
      "category": "diagnostic", "enabled_by_default": True, "command_on": 1, "command_off": 0},
@@ -172,6 +174,13 @@ class VictronEssDriver(BatteryDriver):
         # would change nothing while still feeding the watchdog on time.
         self._written_ac_in_w: Optional[int] = None
         self._written_monotonic = 0.0
+        # When the target last became 0 W (monotonic) — see _is_idle.
+        self._zero_since = 0.0
+        # What the user's two switches ask for. Not persisted: both start
+        # off after a restart.
+        self._user_disable = {"disable_charge": False, "disable_feedin": False}
+        # Registers 38/39 as last written or read back; None when unknown.
+        self._disable_flags: Optional[tuple[int, int]] = None
         # The GX device's own serial (register 800), read once on connect —
         # not polled telemetry. None until read; also keys the synthetic-
         # energy backup so a removed/re-added battery reclaims its totals.
@@ -303,8 +312,12 @@ class VictronEssDriver(BatteryDriver):
             )
             if regs is not None:
                 snapshot["ac_power_setpoint"] = decode_i16(regs, 0)
-                snapshot["disable_charge"] = decode_u16(regs, 1)
-                snapshot["disable_feedin"] = decode_u16(regs, 2)
+                # Remembered so a readback that disagrees with what is wanted
+                # gets corrected on the next poll.
+                self._disable_flags = (
+                    int(bool(decode_u16(regs, 1))), int(bool(decode_u16(regs, 2)))
+                )
+                snapshot.update({k: int(v) for k, v in self._user_disable.items()})
 
         if requested is None or "ess_control_mode" in requested:
             regs = await self._client.async_read_holding_block(
@@ -377,6 +390,41 @@ class VictronEssDriver(BatteryDriver):
             self._written_monotonic = asyncio.get_running_loop().time()
         return ok
 
+    def _is_idle(self) -> bool:
+        """Whether the battery should be locked idle: commanded 0 W, and for
+        long enough that it is evidently not the battery in use.
+
+        A non-zero command always unlocks at once. The delay keeps the lock
+        off a battery that is merely passing through zero, where it would
+        flap every few seconds.
+        """
+        if self._target_w is None or self._clamp(self._target_w) != 0:
+            return False
+        return asyncio.get_running_loop().time() - self._zero_since >= _IDLE_LOCK_DELAY_S
+
+    async def _sync_disable_flags(self, idle: bool) -> bool:
+        """Write DisableCharge/DisableFeedIn: each is set if the user's
+        switch asks for it, and both are set while the target is 0 W.
+
+        Matching AC-in to AC-out is not a true idle: the 10 W AC-out
+        resolution and the Multi's own conversion losses still come out of
+        the battery (30-50 W on real hardware). With both flags set the Multi
+        cannot touch the battery at all, whatever AC-out does — the same
+        flags the GX device's own ESS uses to idle it. A failed write leaves
+        the state unknown, so the next poll tries again.
+        """
+        wanted = (
+            int(idle or self._user_disable["disable_charge"]),
+            int(idle or self._user_disable["disable_feedin"]),
+        )
+        if self._disable_flags == wanted:
+            return True
+        ok = await self._client.async_write_registers(
+            self._vebus_unit_id, _REG_VEBUS_DISABLE_CHARGE, list(wanted)
+        )
+        self._disable_flags = wanted if ok else None
+        return ok
+
     async def _hold_target(self) -> None:
         """Keep the held battery target true against a fresh AC-out reading.
 
@@ -389,7 +437,9 @@ class VictronEssDriver(BatteryDriver):
         """
         if self._target_w is None or self._shutting_down or self._refusal() is not None:
             return
-        ac_in_w = self._ac_in_target(self._clamp(self._target_w))
+        target_w = self._clamp(self._target_w)
+        await self._sync_disable_flags(self._is_idle())
+        ac_in_w = self._ac_in_target(target_w)
         age_s = asyncio.get_running_loop().time() - self._written_monotonic
         if ac_in_w == self._written_ac_in_w and age_s < _SETPOINT_REFRESH_INTERVAL_S:
             return
@@ -406,6 +456,8 @@ class VictronEssDriver(BatteryDriver):
         # Held even when the write below is refused or fails: it is still
         # what the controller wants, and _hold_target applies it as soon as
         # the gate reopens.
+        if applied == 0 and self._target_w != 0:
+            self._zero_since = asyncio.get_running_loop().time()
         self._target_w = applied
 
         failure_reason = self._refusal()
@@ -415,6 +467,9 @@ class VictronEssDriver(BatteryDriver):
                 failure_reason=failure_reason,
             )
 
+        # Unlock before a non-zero setpoint, lock before the idle one: either
+        # order is safe (the flags only ever restrict), this one is prompt.
+        await self._sync_disable_flags(self._is_idle())
         ac_in_target = self._ac_in_target(applied)
         if not await self._write_ac_in(ac_in_target):
             return SetpointResult(
@@ -454,12 +509,10 @@ class VictronEssDriver(BatteryDriver):
         )
 
     async def write_control(self, key: str, value: int) -> bool:
-        register = _WRITE_CONTROLS.get(key)
-        if register is None:
+        if key not in self._user_disable:
             return False
-        return await self._client.async_write_registers(
-            self._vebus_unit_id, register, [1 if value else 0]
-        )
+        self._user_disable[key] = bool(value)
+        return await self._sync_disable_flags(self._is_idle())
 
     def net_power_from_data(self, data: dict) -> Optional[int]:
         value = data.get("battery_setpoint_w")
@@ -485,7 +538,8 @@ class VictronEssDriver(BatteryDriver):
             self._capabilities = replace(self._capabilities, **updates)
 
     async def standby(self) -> bool:
-        """Stop writing and let the hardware watchdog revert to passthrough.
+        """Stop writing, release the idle lock, and let the hardware
+        watchdog revert to passthrough.
 
         Does not restore the Multi's own ESS mode — writing Hub4Mode back is
         unconfirmed, and guessing wrong on a settings register risks a worse
@@ -493,6 +547,10 @@ class VictronEssDriver(BatteryDriver):
         until ESS Mode is switched back by hand, independent of this call.
         """
         self._target_w = None
+        # Drop the idle lock (the user's own switches stay as set): it would
+        # otherwise outlive this integration and keep the battery idle under
+        # whatever drives it next.
+        await self._sync_disable_flags(False)
         _LOGGER.info(
             "Victron driver: standby — no further AcPowerSetpoint writes will be "
             "issued; the Multi returns to passthrough within %.0fs on its own",
