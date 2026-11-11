@@ -385,6 +385,10 @@ class VictronEssDriver(BatteryDriver):
         ok = await self._client.async_write_registers(
             self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(ac_in_w)]
         )
+        _LOGGER.debug(
+            "Victron driver: AcPowerSetpoint=%sW (battery target %sW + AC-out %sW)%s",
+            ac_in_w, self._target_w, self._ac_out_load_w, "" if ok else " — write failed",
+        )
         if ok:
             self._written_ac_in_w = ac_in_w
             self._written_monotonic = asyncio.get_running_loop().time()
@@ -421,6 +425,11 @@ class VictronEssDriver(BatteryDriver):
             return True
         ok = await self._client.async_write_registers(
             self._vebus_unit_id, _REG_VEBUS_DISABLE_CHARGE, list(wanted)
+        )
+        _LOGGER.debug(
+            "Victron driver: DisableCharge=%s DisableFeedIn=%s (idle lock %s, was %s)%s",
+            wanted[0], wanted[1], "on" if idle else "off", self._disable_flags,
+            "" if ok else " — write failed",
         )
         self._disable_flags = wanted if ok else None
         return ok
