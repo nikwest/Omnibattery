@@ -87,6 +87,8 @@ Checks on changes and every 15 seconds.
 
 Configure the SOC floor, a higher SOC recovery target, charge power, and idle target. It restores the idle target when SOC reaches the recovery target or capacity protection ends.
 
+The grid target is the total import, not the charge power: the battery charges with the target minus the house load, and does not charge while the house draws more than the target. Setting it to your Peak Limit charges whatever fits under the peak. System SOC counts only batteries under automatic control, so a battery in manual mode (for example balancing) does not hold it up.
+
 ## Forward persistent notifications to Telegram
 
 [Import blueprint](https://raw.githubusercontent.com/ffunes/Omnibattery/main/blueprints/persistent_notification_to_telegram_blueprint.yaml)
@@ -111,6 +113,8 @@ It sends the notification title, ID, and message with HTML-safe escaping.
 
 The notification may be visible briefly before Home Assistant executes the automation. Disable the automation at any time to receive predictive-charging notifications again.
 
+To stop these notifications at the source instead, turn off the **Predictive Charging Notifications** switch; see [Predictive charging](../configuration/predictive-charging/index.md).
+
 ## Solar forecast reserve discharge
 
 [Import blueprint](https://raw.githubusercontent.com/ffunes/Omnibattery/main/blueprints/solar_forecast_reserve_discharge_blueprint.yaml)
@@ -125,3 +129,15 @@ Configure the reserve, release hysteresis, forecast margin, and daytime window.
 
 ??? "Advanced details"
     The calculation includes a fixed 78% charge-efficiency assumption and the safety margin.
+
+## Backup reserve for power outages
+
+[Import blueprint](https://raw.githubusercontent.com/ffunes/Omnibattery/main/blueprints/backup_reserve_discharge_blueprint.yaml)
+
+- **Purpose:** keeps a fixed SOC reserve (for example 90% in winter) for power outages, above the battery's own minimum-SOC limit.
+- **Requires:** the Allow Discharge switches to control and the system SOC sensor. Optionally, binary sensors that are ON during a grid outage.
+- **Controls:** the selected **Allow Discharge** switches only.
+- **Compatible with:** any installation.
+- **Does not do:** write Modbus registers, force battery modes or block charging. Solar and grid charging refill the reserve normally.
+
+Discharge stops when SOC falls to the reserve and resumes once SOC rises above the reserve plus the hysteresis. While any outage sensor is ON, discharge is allowed. When you no longer want the reserve, disable the automation and turn the Allow Discharge switches back on.

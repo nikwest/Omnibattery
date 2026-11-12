@@ -25,9 +25,6 @@ Omnibattery uses your grid-power sensor to decide how much the batteries should 
 
 ![Select the main Omnibattery sensors](../assets/screenshots/configuration/main-sensor.png){ width="600" style="display: block; margin: 0 auto;"}
 
-!!! warning "Screenshot needs updating"
-    The current form also includes separate remaining-today forecast, off-grid meter, and three-phase protection fields that are not visible in this screenshot.
-
 ## What you will see
 
 The dashboard energy-flow diagram uses the grid sensor and available battery and solar data. Omnibattery also creates **Home Consumption** by combining those sources; you do not select a separate household-consumption sensor.
@@ -50,7 +47,7 @@ A remaining-today solar forecast becomes available to predictive charging and so
 ??? "Advanced details"
     **Meter cadence and stale data**
 
-    The controller recalculates whenever the grid sensor publishes. A safety cycle also runs every 2 seconds. An update interval of 1–2 seconds is recommended; intervals of 10 seconds or more trigger a Home Assistant Repair after 3 consecutive slow reports. The Repair clears after 20 consecutive faster intervals. The latest reading remains authoritative until it is more than 65 seconds old.
+    The controller recalculates whenever the grid sensor publishes. A safety cycle also runs every 2 seconds. An update interval of 1–2 seconds is recommended; intervals of 10 seconds or more trigger a Home Assistant Repair after 3 consecutive slow reports. The Repair clears after 20 consecutive faster intervals. The latest reading remains authoritative until it is more than 65 seconds old. After 5 minutes without a valid reading, including a sensor that never reports after a restart, Omnibattery raises a Repair and stops automatic control at 0W until the sensor reports again; see [Grid meter is unavailable or frozen](../troubleshooting.md#grid-meter-is-unavailable-or-frozen).
 
     Household demand can change by several kilowatts between slow readings, so the controller may otherwise respond to a load that has already changed.
 

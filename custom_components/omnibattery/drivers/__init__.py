@@ -19,6 +19,8 @@ Drivers:
   - ``hoymiles``: HA MQTT based, push telemetry (MS-A2).
   - ``huawei``: native Modbus-TCP telemetry, set-points via huawei_solar
     services (SUN2000 + LUNA2000).
+  - ``indevolt``: local HTTP, paced scheduler, realtime RAM tuple only
+    (SolidFlex / PowerFlex).
   - ``victron``: native Modbus-TCP telemetry and set-points via ESS external
     control (Multiplus/Quattro behind a GX device).
 
@@ -40,6 +42,7 @@ from .anker import AnkerModbusDriver
 from .sessy import SessyLocalDriver
 from .hoymiles import HoymilesMqttDriver
 from .huawei import HuaweiSolarDriver
+from .indevolt import IndevoltDriver
 from .victron import VictronEssDriver
 
 __all__ = [
@@ -56,5 +59,6 @@ __all__ = [
     "SessyLocalDriver",
     "HoymilesMqttDriver",
     "HuaweiSolarDriver",
+    "IndevoltDriver",
     "VictronEssDriver",
 ]
