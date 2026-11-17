@@ -51,6 +51,19 @@ def _fake_client():
     return client
 
 
+def _ac_out_block(power_word, dc_voltage_raw=4850):
+    """The vebus 23-26 block: AC-out power(23), L2/L3 power, and the Multi's
+    DC voltage(26, scale 100) that vouches for it — 48.50 V by default, 0
+    for the GX's invalid-value placeholder."""
+    return [power_word, 0, 0, dc_voltage_raw]
+
+
+def _every_read_answers(word):
+    """A read that answers ``word`` in every register it was asked for, the
+    way the real client returns exactly ``count`` registers."""
+    return AsyncMock(side_effect=lambda unit_id, start, count: [word] * count)
+
+
 def _driver(
     client=None, consumption=0, ess_mode_external=True,
     consumption_age_s=0.0, ess_mode_age_s=0.0, **kw,
@@ -80,6 +93,9 @@ def _driver(
     driver._ac_out_load_monotonic = time.monotonic() - consumption_age_s
     driver._ess_mode_confirmed_external = ess_mode_external
     driver._ess_mode_monotonic = time.monotonic() - ess_mode_age_s
+    # Both GX services already vouched for (the gate starts closed on its
+    # own); the GX-validity gate has its own tests.
+    driver._service_valid = {"system": True, "vebus": True}
     # Idle lock already known-clear, so tests about the setpoint see only the
     # setpoint write; the lock has its own tests.
     driver._disable_flags = (0, 0)
@@ -172,7 +188,7 @@ async def test_read_telemetry_rejects_out_of_range_soc():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            [0, 0, 0, 0xFFFF] if start == _REG_SYSTEM_BATTERY_VOLTAGE else None
+            [530, 0, 0, 0xFFFF] if start == _REG_SYSTEM_BATTERY_VOLTAGE else None
         )
     )
     driver = _driver(client=client)
@@ -195,6 +211,222 @@ async def test_read_telemetry_omits_keys_on_failed_block():
     assert "ac_power_setpoint" not in data
     assert "ac_out_load" not in data
     assert "ess_control_mode" not in data
+
+
+def _battery_block_client(blocks):
+    """A client whose 840-843 battery block answers ``blocks`` in turn
+    (None = failed read); every other register fails."""
+    client = _fake_client()
+    answers = iter(blocks)
+
+    async def fake_read(unit_id, start, count):
+        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_VOLTAGE and count == 4:
+            return next(answers)
+        return None
+
+    client.async_read_holding_block = AsyncMock(side_effect=fake_read)
+    return client
+
+
+_BATTERY_KEYS = ["battery_soc", "battery_power", "battery_voltage"]
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_drops_the_gx_invalid_value_block():
+    """dbus_modbustcp answers an invalid D-Bus value with 0, not an
+    exception. Seen on real hardware after the GX's Modbus port refused
+    connections: SOC 67% -> 0% -> 67%. A 0 V battery is that placeholder,
+    so voltage, power and SOC are all omitted, never reported as 0."""
+    driver = _driver(client=_battery_block_client([[0, 0, 0, 0]]))
+
+    data = await driver.read_telemetry(_BATTERY_KEYS)
+
+    assert data == {}
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_rejects_a_zero_soc_too_soon_after_a_real_reading():
+    """Voltage valid but SOC 0 right after 67%: no battery drains that fast,
+    so it is the placeholder — omitted, and the coordinator keeps 67%."""
+    driver = _driver(client=_battery_block_client([
+        [530, 0, 0, 67],
+        [530, 0, 0, 0],
+        [530, 0, 0, 0],
+        [530, 0, 0, 67],
+    ]))
+
+    assert (await driver.read_telemetry(_BATTERY_KEYS))["battery_soc"] == 67
+    for _ in range(2):
+        data = await driver.read_telemetry(_BATTERY_KEYS)
+        assert "battery_soc" not in data
+        assert data["battery_voltage"] == 530  # the rest of the block is real
+    # Recovery: the next real reading goes straight through.
+    assert (await driver.read_telemetry(_BATTERY_KEYS))["battery_soc"] == 67
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_keeps_rejecting_a_placeholder_zero_however_long_it_lasts():
+    """A prolonged placeholder must not turn 'plausible' just because enough
+    time passed since the last real reading."""
+    driver = _driver(client=_battery_block_client([[530, 0, 0, 67]] + [[530, 0, 0, 0]] * 2))
+
+    await driver.read_telemetry(_BATTERY_KEYS)
+    assert "battery_soc" not in await driver.read_telemetry(_BATTERY_KEYS)
+    # Pretend the last real reading was an hour ago.
+    driver._last_valid_soc_monotonic -= 3600
+    assert "battery_soc" not in await driver.read_telemetry(_BATTERY_KEYS)
+
+
+@pytest.mark.asyncio
+async def test_read_telemetry_reports_a_real_zero_soc():
+    """A battery that really runs empty passes: 0% right after 1%, 0% with
+    no earlier reading, and 0% long after an outage that hid the drain."""
+    driver = _driver(client=_battery_block_client([[512, 0, 0, 1], [505, 0, 0, 0]]))
+    await driver.read_telemetry(_BATTERY_KEYS)
+    assert (await driver.read_telemetry(_BATTERY_KEYS))["battery_soc"] == 0
+
+    driver = _driver(client=_battery_block_client([[505, 0, 0, 0]]))
+    assert (await driver.read_telemetry(_BATTERY_KEYS))["battery_soc"] == 0
+
+    driver = _driver(client=_battery_block_client([[530, 0, 0, 67], None, [505, 0, 0, 0]]))
+    await driver.read_telemetry(_BATTERY_KEYS)
+    assert await driver.read_telemetry(_BATTERY_KEYS) == {}  # outage: nothing, not 0
+    driver._last_valid_soc_monotonic -= 3600  # ...that lasted an hour
+    assert (await driver.read_telemetry(_BATTERY_KEYS))["battery_soc"] == 0
+
+
+# ----------------------------------------------------------------------
+# the GX-validity gate
+# ----------------------------------------------------------------------
+
+def _gx_client(battery_block=None, ac_out_block=None, setpoint_block=None):
+    """A client answering the three telemetry blocks with fixed values;
+    pass a list to change them between reads (driver tests mutate it)."""
+    client = _fake_client()
+
+    async def fake_read(unit_id, start, count):
+        if (unit_id, start) == (100, _REG_SYSTEM_BATTERY_VOLTAGE):
+            return battery_block[:count] if battery_block is not None else None
+        if (unit_id, start) == (227, _REG_VEBUS_AC_OUT_L1_POWER):
+            return ac_out_block
+        if (unit_id, start) == (227, _REG_VEBUS_AC_POWER_SETPOINT_L1):
+            return setpoint_block[:count] if setpoint_block is not None else None
+        return None
+
+    client.async_read_holding_block = AsyncMock(side_effect=fake_read)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_gate_drops_the_vebus_placeholder_and_refuses_writes():
+    """A 0 V vebus block is the placeholder: AC-out 0 W is not taken (the
+    compensation would otherwise run on it), and register 37 is not written
+    — neither by a command nor by the poll's hold."""
+    ac_out = _ac_out_block(encode_i16(150))
+    client = _gx_client(ac_out_block=ac_out)
+    driver = _driver(client=client, consumption=1500)
+    await driver.apply_setpoint(-1000, read_back=False)
+    client.async_write_registers.reset_mock()
+
+    ac_out[:] = _ac_out_block(0, dc_voltage_raw=0)
+    data = await driver.read_telemetry(["ac_out_load"])
+
+    assert "ac_out_load" not in data
+    assert driver._ac_out_load_w == 1500       # the last real reading, kept
+    client.async_write_registers.assert_not_awaited()
+    result = await driver.apply_setpoint(-1000)
+    assert not result.ok and result.failure_reason == "gx_data_invalid"
+    client.async_write_registers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gate_drops_the_setpoint_block_while_vebus_is_invalid():
+    """37-39 carry no voltage of their own: their placeholder (0 W, both
+    flags clear) is dropped while vebus last answered 0 V."""
+    client = _gx_client(
+        ac_out_block=_ac_out_block(0, dc_voltage_raw=0), setpoint_block=[0, 0, 0],
+    )
+    driver = _driver(client=client)
+    driver._disable_flags = (1, 1)
+
+    await driver.read_telemetry(["ac_out_load"])
+    data = await driver.read_telemetry(["ac_power_setpoint", "disable_charge", "disable_feedin"])
+
+    assert data == {}
+    assert driver._disable_flags == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_gate_drops_the_system_placeholder_and_refuses_writes():
+    """The incident: SOC 67% -> 0% (a 0 V battery block) -> 67%. The block is
+    dropped whole, writes stop, and the next real block reopens the gate."""
+    battery = [530, 0, 0, 67]
+    client = _gx_client(battery_block=battery, ac_out_block=_ac_out_block(0))
+    driver = _driver(client=client)
+
+    battery[:] = [0, 0, 0, 0]
+    assert await driver.read_telemetry(_BATTERY_KEYS) == {}
+    result = await driver.apply_setpoint(500)
+    assert result.failure_reason == "gx_data_invalid"
+
+    battery[:] = [530, 0, 0, 67]
+    assert (await driver.read_telemetry(_BATTERY_KEYS))["battery_soc"] == 67
+    assert (await driver.apply_setpoint(500)).ok
+
+
+@pytest.mark.asyncio
+async def test_gate_reopening_applies_the_held_command():
+    """A command refused while the gate was closed is still held, and the
+    first poll after the GX recovers writes it — like the other refusals."""
+    ac_out = _ac_out_block(0, dc_voltage_raw=0)
+    client = _gx_client(ac_out_block=ac_out)
+    driver = _driver(client=client, consumption=0)
+    await driver.read_telemetry(["ac_out_load"])        # closes the gate
+    assert (await driver.apply_setpoint(800)).failure_reason == "gx_data_invalid"
+    client.async_write_registers.assert_not_awaited()
+
+    ac_out[:] = _ac_out_block(encode_i16(20))           # 200 W AC-out
+    await driver.read_telemetry(["ac_out_load"])
+
+    client.async_write_registers.assert_awaited_with(
+        227, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(1000)]
+    )
+
+
+@pytest.mark.asyncio
+async def test_gate_starts_closed_on_every_connect():
+    """A reconnect is typically a GX that just restarted its services: no
+    write until both services have shown a real DC voltage since."""
+    client = _gx_client(battery_block=[530, 0, 0, 67], ac_out_block=_ac_out_block(0))
+    driver = _driver(client=client)
+    assert (await driver.apply_setpoint(300)).ok
+
+    await driver.connect()
+    assert (await driver.apply_setpoint(300)).failure_reason == "gx_data_invalid"
+
+    await driver.read_telemetry(_BATTERY_KEYS)          # system vouched for
+    assert (await driver.apply_setpoint(300)).failure_reason == "gx_data_invalid"
+    await driver.read_telemetry(["ac_out_load"])        # ...and vebus
+    assert (await driver.apply_setpoint(300)).ok
+
+
+@pytest.mark.asyncio
+async def test_failed_reads_do_not_change_the_gate():
+    """A connection failure omits values on its own; it is not evidence the
+    GX's data went invalid, so it neither closes nor opens the gate."""
+    driver = _driver(client=_gx_client())
+    await driver.read_telemetry(None)
+    assert driver._service_valid == {"system": True, "vebus": True}
+
+
+@pytest.mark.asyncio
+async def test_setpoint_readback_placeholder_closes_the_gate():
+    client = _gx_client(battery_block=[0, 0, 0, 0], setpoint_block=[encode_i16(500)])
+    driver = _driver(client=client)
+
+    result = await driver.apply_setpoint(500)
+    assert result.battery_power_w is None
+    assert (await driver.apply_setpoint(500)).failure_reason == "gx_data_invalid"
 
 
 @pytest.mark.asyncio
@@ -230,7 +462,7 @@ async def test_read_telemetry_tracks_ac_out_power_for_the_compensation(raw, expe
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            [raw] if (unit_id, start) == (227, _REG_VEBUS_AC_OUT_L1_POWER) else None
+            _ac_out_block(raw) if (unit_id, start) == (227, _REG_VEBUS_AC_OUT_L1_POWER) else None
         )
     )
     driver = _driver(client=client, consumption=None)
@@ -268,7 +500,7 @@ async def test_read_telemetry_reports_ess_control_mode(mode, expected_label, exp
 @pytest.mark.asyncio
 async def test_apply_setpoint_writes_and_confirms_with_zero_consumption():
     client = _fake_client()
-    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(1200)])
+    client.async_read_holding_block = _every_read_answers(encode_i16(1200))
     driver = _driver(client=client, consumption=0)
 
     result = await driver.apply_setpoint(1200)
@@ -296,7 +528,7 @@ async def test_apply_setpoint_compensates_for_ac_out_load(net_power_w, consumpti
     the grid-point register asks for the opposite of what was intended
     whenever there's a load on AC-out."""
     client = _fake_client()
-    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(expected_register_value)])
+    client.async_read_holding_block = _every_read_answers(encode_i16(expected_register_value))
     driver = _driver(client=client, consumption=consumption)
 
     result = await driver.apply_setpoint(net_power_w)
@@ -343,7 +575,7 @@ async def test_apply_setpoint_refuses_unless_positively_confirmed_external(ess_m
 @pytest.mark.asyncio
 async def test_apply_setpoint_proceeds_only_when_positively_confirmed_external():
     client = _fake_client()
-    client.async_read_holding_block = AsyncMock(return_value=[encode_i16(500)])
+    client.async_read_holding_block = _every_read_answers(encode_i16(500))
     driver = _driver(client=client, consumption=0, ess_mode_external=True)
 
     result = await driver.apply_setpoint(500)
@@ -396,7 +628,7 @@ async def test_read_telemetry_refreshes_the_freshness_timestamps():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            [180] if start == _REG_VEBUS_AC_OUT_L1_POWER
+            _ac_out_block(180) if start == _REG_VEBUS_AC_OUT_L1_POWER
             else [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE
             else None
         )
@@ -420,8 +652,10 @@ async def test_apply_setpoint_reports_actual_battery_power_separately_from_the_e
     async def fake_read(unit_id, start, count):
         if unit_id == 227 and start == _REG_VEBUS_AC_POWER_SETPOINT_L1:
             return [encode_i16(1200)]  # the setpoint echo
-        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_POWER:
-            return [encode_i16(300)]  # what the Multi actually achieved so far
+        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_VOLTAGE and count == 3:
+            # Voltage(840)/Current(841)/Power(842): what the Multi actually
+            # achieved so far.
+            return [530, 0, encode_i16(300)]
         return None
 
     client.async_read_holding_block = AsyncMock(side_effect=fake_read)
@@ -434,9 +668,31 @@ async def test_apply_setpoint_reports_actual_battery_power_separately_from_the_e
 
 
 @pytest.mark.asyncio
+async def test_apply_setpoint_does_not_report_the_gx_placeholder_as_zero_delivery():
+    """A 0 V block is the GX's invalid-value answer: battery power unknown,
+    not 0 W delivered (which would count as a non-delivery strike)."""
+    client = _fake_client()
+
+    async def fake_read(unit_id, start, count):
+        if unit_id == 227 and start == _REG_VEBUS_AC_POWER_SETPOINT_L1:
+            return [encode_i16(1200)]
+        if unit_id == 100 and start == _REG_SYSTEM_BATTERY_VOLTAGE:
+            return [0, 0, 0]
+        return None
+
+    client.async_read_holding_block = AsyncMock(side_effect=fake_read)
+    driver = _driver(client=client, consumption=0)
+
+    result = await driver.apply_setpoint(1200)
+
+    assert result.confirmed is True
+    assert result.battery_power_w is None
+
+
+@pytest.mark.asyncio
 async def test_apply_setpoint_clamps_to_envelope():
     driver = _driver(max_charge_power_w=2000, max_discharge_power_w=1500, consumption=0)
-    driver._client.async_read_holding_block = AsyncMock(return_value=[encode_i16(2000)])
+    driver._client.async_read_holding_block = _every_read_answers(encode_i16(2000))
 
     over_charge = await driver.apply_setpoint(9000)
     assert over_charge.net_power_w == 2000
@@ -489,7 +745,7 @@ def _ac_out_client(raw_ac_out):
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            [encode_i16(raw_ac_out)] if start == _REG_VEBUS_AC_OUT_L1_POWER else None
+            _ac_out_block(encode_i16(raw_ac_out)) if start == _REG_VEBUS_AC_OUT_L1_POWER else None
         )
     )
     return client
@@ -664,7 +920,7 @@ async def test_idle_lock_is_reasserted_when_the_readback_disagrees():
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
             [encode_i16(400), 1, 0] if start == _REG_VEBUS_AC_POWER_SETPOINT_L1  # mixed pair
-            else [40] if start == _REG_VEBUS_AC_OUT_L1_POWER
+            else _ac_out_block(40) if start == _REG_VEBUS_AC_OUT_L1_POWER
             else None
         )
     )
