@@ -88,7 +88,7 @@ async def async_setup_entry(
             # Marstek-only cell maintenance: voltage taper needs per-cell
             # voltages the other brands do not expose in the same way. Same
             # brand list as the taper option in the config flow.
-            if coordinator.brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt"):
+            if coordinator.brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt", "victron"):
                 entities.append(BatteryFullChargeVoltageTaperSwitch(hass, entry, controller, coordinator))
 
     # Add manual mode switch (system-level, always present)

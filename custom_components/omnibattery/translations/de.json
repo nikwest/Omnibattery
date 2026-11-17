@@ -751,6 +751,28 @@
         "description": "Auf diesem Modbus-Zugang haben {count} Wechselrichter mit Batterie geantwortet. Huawei-Wechselrichter lassen sich kaskadieren — wähle den, zu dem diese Batterie gehört. Für eine zweite Batterie legst du einen weiteren Eintrag mit der anderen Slave-ID an.",
         "data": {"slave_id": "Wechselrichter"}
       },
+      "battery_connection_victron": {
+        "title": "Batterie {battery_num} einrichten — Verbindung (Victron)",
+        "description": "Batterie {battery_num} ist ein Multiplus/Quattro hinter einem Victron-GX-Gerät (Cerbo GX, Venus GX oder Venus OS), gesteuert über ESS External Control. Trage die Adresse des GX-Geräts ein, nicht die des Multi — der hat keine eigene Netzwerkverbindung. Die vebus-Unit-ID steht auf dem GX-Gerät unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste; sie lässt sich nicht erraten und ist je Installation verschieden. Die System-Unit-ID ist standardmäßig 100, Victrons dokumentierter Standard für den Systemdienst — lass sie so, außer dein GX-Gerät antwortet unter einer anderen. Damit das funktioniert, stelle auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
+        "data": {
+          "name": "Name",
+          "host": "IP-Adresse",
+          "port": "Modbus-Port",
+          "victron_vebus_unit_id": "Unit-ID des Multiplus/Quattro (vebus)",
+          "victron_system_unit_id": "System-Unit-ID",
+          "max_charge_power": "Max. Ladeleistung (W)",
+          "max_discharge_power": "Max. Entladeleistung (W)"
+        },
+        "data_description": {
+          "name": "Sprechender Name für diese Batterie",
+          "host": "Adresse des GX-Geräts, nicht des Multiplus/Quattro selbst",
+          "port": "Modbus-TCP-Port (Standard 502)",
+          "victron_vebus_unit_id": "Unit-ID des vebus-Dienstes (Multiplus/Quattro)",
+          "victron_system_unit_id": "Unit-ID des Systemdienstes — 100 ist Victrons dokumentierter Standard; nur ändern, wenn dein GX-Gerät unter einer anderen antwortet",
+          "max_charge_power": "Sichere Ladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen",
+          "max_discharge_power": "Sichere Entladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Enter connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -1396,6 +1418,28 @@
         "description": "Auf diesem Modbus-Zugang haben {count} Wechselrichter mit Batterie geantwortet. Huawei-Wechselrichter lassen sich kaskadieren — wähle den, zu dem diese Batterie gehört. Für eine zweite Batterie legst du einen weiteren Eintrag mit der anderen Slave-ID an.",
         "data": {"slave_id": "Wechselrichter"}
       },
+      "battery_connection_victron": {
+        "title": "Batterie {battery_num} einrichten — Verbindung (Victron)",
+        "description": "Batterie {battery_num} ist ein Multiplus/Quattro hinter einem Victron-GX-Gerät (Cerbo GX, Venus GX oder Venus OS), gesteuert über ESS External Control. Trage die Adresse des GX-Geräts ein, nicht die des Multi — der hat keine eigene Netzwerkverbindung. Die vebus-Unit-ID steht auf dem GX-Gerät unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste; sie lässt sich nicht erraten und ist je Installation verschieden. Die System-Unit-ID ist standardmäßig 100, Victrons dokumentierter Standard für den Systemdienst — lass sie so, außer dein GX-Gerät antwortet unter einer anderen. Damit das funktioniert, stelle auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
+        "data": {
+          "name": "Name",
+          "host": "IP-Adresse",
+          "port": "Modbus-Port",
+          "victron_vebus_unit_id": "Unit-ID des Multiplus/Quattro (vebus)",
+          "victron_system_unit_id": "System-Unit-ID",
+          "max_charge_power": "Max. Ladeleistung (W)",
+          "max_discharge_power": "Max. Entladeleistung (W)"
+        },
+        "data_description": {
+          "name": "Sprechender Name für diese Batterie",
+          "host": "Adresse des GX-Geräts, nicht des Multiplus/Quattro selbst",
+          "port": "Modbus-TCP-Port (Standard 502)",
+          "victron_vebus_unit_id": "Unit-ID des vebus-Dienstes (Multiplus/Quattro)",
+          "victron_system_unit_id": "Unit-ID des Systemdienstes — 100 ist Victrons dokumentierter Standard; nur ändern, wenn dein GX-Gerät unter einer anderen antwortet",
+          "max_charge_power": "Sichere Ladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen",
+          "max_discharge_power": "Sichere Entladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Modify connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -1623,6 +1667,12 @@
       },
       "hourly_balance": {
         "name": "Netto-Balance"
+      },
+      "disable_charge": {
+        "name": "ESS Laden sperren"
+      },
+      "disable_feedin": {
+        "name": "ESS Einspeisung sperren"
       },
       "weekly_full_charge_enabled": {
         "name": "Wöchentliche Vollladung"
@@ -2323,6 +2373,15 @@
       },
       "inverter_ac_power": {
         "name": "Wechselrichter-AC-Leistung"
+      },
+      "ac_power_setpoint": {
+        "name": "ESS AC-Leistungssollwert"
+      },
+      "ac_out_load": {
+        "name": "AC-Ausgangsleistung"
+      },
+      "ess_control_mode": {
+        "name": "ESS-Steuermodus"
       },
       "charging_cutoff_capacity": {
         "name": "Ladeschlussgrenze"

@@ -21,6 +21,8 @@ Drivers:
     services (SUN2000 + LUNA2000).
   - ``indevolt``: local HTTP, paced scheduler, realtime RAM tuple only
     (SolidFlex / PowerFlex).
+  - ``victron``: native Modbus-TCP telemetry and set-points via ESS external
+    control (Multiplus/Quattro behind a GX device).
 
 See ``docs/plans/driver_abstraction.md`` for the phased extraction plan.
 """
@@ -41,6 +43,7 @@ from .sessy import SessyLocalDriver
 from .hoymiles import HoymilesMqttDriver
 from .huawei import HuaweiSolarDriver
 from .indevolt import IndevoltDriver
+from .victron import VictronEssDriver
 
 __all__ = [
     "DELIVERED_AC_POWER_KEY",
@@ -57,4 +60,5 @@ __all__ = [
     "HoymilesMqttDriver",
     "HuaweiSolarDriver",
     "IndevoltDriver",
+    "VictronEssDriver",
 ]

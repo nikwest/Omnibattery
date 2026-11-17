@@ -164,6 +164,7 @@ from .drivers.indevolt import IndevoltDriver
 from .drivers.indevolt_settings import SYNCED_PREFIX as INDEVOLT_SYNCED_PREFIX
 from .infra.indevolt_client import DEFAULT_REQUEST_SPEED, REQUEST_SPEED_SLOT_S, IndevoltAuthenticationError
 from .drivers.huawei import HuaweiSolarDriver
+from .drivers.victron import VictronEssDriver
 from .drivers.hoymiles import (
     DEFAULT_HOYMILES_MODEL,
     HOYMILES_MODEL_PROFILES,
@@ -184,6 +185,11 @@ from .pricing.energyzero import (
 )
 
 _ANKER_MAX_POWER_W = 3500
+# No hardware-reported ceiling exists for Victron (unlike Anker/Huawei): the
+# installed base spans everything from a single small Multiplus to a stacked
+# Quattro system, so the user enters the real ceiling directly in the
+# connection step. This only bounds the input form against a typo.
+_VICTRON_MAX_POWER_W = 20000
 _SESSY_MAX_CHARGE_POWER_W = 2200
 _SESSY_MAX_DISCHARGE_POWER_W = 1700
 _SESSY_DEFAULT_MIN_SOC = 5
@@ -592,6 +598,11 @@ def _soc_selector_limits(
         # The inverter keeps its own discharge cutoff as a backstop; this window
         # is what Omnibattery enforces on top of it.
         min_lo, min_hi, min_default = 0, 30, 10
+    elif brand == "victron":
+        # DVCC/the BMS keeps its own protections as a backstop; no confirmed
+        # register ties this window to anything Victron enforces itself, so
+        # it is purely software, same as Huawei.
+        min_lo, min_hi, min_default = 0, 30, 10
     else:
         min_lo, min_hi, min_default = 12, 30, 12
         # v3/vA/vD enforce this in software, so the 30 % of the v2 register
@@ -761,6 +772,52 @@ def _hoymiles_capacity_default(battery_data: dict) -> float:
             battery_data.get("device_max_discharge_power"),
         ) or 2.24
     return 2.24
+
+
+def _victron_connection_schema(battery_num: int, saved: dict | None = None) -> vol.Schema:
+    """Shared form for the setup and options flows; ``saved`` pre-fills an edit."""
+    saved = saved or {}
+    unit_id = vol.All(
+        NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)),
+        vol.Coerce(int),
+    )
+    power = NumberSelector(
+        NumberSelectorConfig(min=100, max=_VICTRON_MAX_POWER_W, step=50, unit_of_measurement="W", mode=NumberSelectorMode.BOX)
+    )
+    # No default for the vebus unit id on a new battery: it is not guessable.
+    vebus_key = (
+        vol.Required("victron_vebus_unit_id", default=saved["victron_vebus_unit_id"])
+        if "victron_vebus_unit_id" in saved else vol.Required("victron_vebus_unit_id")
+    )
+    host_key = (
+        vol.Required(CONF_HOST, default=saved[CONF_HOST])
+        if saved.get(CONF_HOST) else vol.Required(CONF_HOST)
+    )
+    return vol.Schema(
+        {
+            vol.Required(CONF_NAME, default=saved.get(CONF_NAME, f"Victron ESS {battery_num}")): str,
+            host_key: str,
+            vol.Optional(CONF_PORT, default=saved.get(CONF_PORT, 502)): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=65535)
+            ),
+            vebus_key: unit_id,
+            vol.Required("victron_system_unit_id", default=saved.get("victron_system_unit_id", 100)): unit_id,
+            vol.Required("max_charge_power", default=saved.get("max_charge_power", 5000)): power,
+            vol.Required("max_discharge_power", default=saved.get("max_discharge_power", 5000)): power,
+        }
+    )
+
+
+def _victron_power_ceilings(battery_data: dict) -> tuple[int, int]:
+    """Echo back the ceiling the user entered in the connection step.
+
+    Unlike Anker/Huawei there is no device-reported value to clamp against;
+    the connection form already bounded the entry to _VICTRON_MAX_POWER_W.
+    """
+    return (
+        max(100, min(_VICTRON_MAX_POWER_W, int(battery_data.get("max_charge_power", _VICTRON_MAX_POWER_W)))),
+        max(100, min(_VICTRON_MAX_POWER_W, int(battery_data.get("max_discharge_power", _VICTRON_MAX_POWER_W)))),
+    )
 
 
 def _anker_apply_probe_caps(battery_data: dict, caps: dict) -> None:
@@ -1756,6 +1813,8 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                 return await self.async_step_battery_connection_indevolt()
             if brand == "huawei":
                 return await self.async_step_battery_connection_huawei()
+            if brand == "victron":
+                return await self.async_step_battery_connection_victron()
             return await self.async_step_battery_connection()
 
         return self.async_show_form(
@@ -1773,11 +1832,55 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                                 {"value": "indevolt", "label": "Indevolt SolidFlex / PowerFlex"},
                                 {"value": "hoymiles", "label": "Hoymiles MQTT"},
                                 {"value": "huawei", "label": "Huawei SUN2000 + LUNA2000"},
+                                {"value": "victron", "label": "Victron Multiplus/Quattro (ESS external control)"},
                             ],
                             mode=SelectSelectorMode.DROPDOWN,
                         )),
                 }
             ),
+            description_placeholders={"battery_num": str(battery_num)},
+        )
+
+    async def async_step_battery_connection_victron(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 3b (Victron): a GX device's Multiplus/Quattro under ESS external control.
+
+        host/port address the GX device itself, not the Multi directly — it has
+        no Ethernet/Wi-Fi of its own. vebus/battery unit ids are not guessable;
+        find them under Settings -> Services -> Modbus/TCP -> Available services
+        on the GX device.
+        """
+        errors: dict[str, str] = {}
+        battery_num = self.battery_index + 1
+
+        if user_input is not None:
+            host = user_input[CONF_HOST]
+            port = int(user_input.get(CONF_PORT, 502))
+            vebus_unit_id = int(user_input["victron_vebus_unit_id"])
+            system_unit_id = int(user_input.get("victron_system_unit_id", 100))
+            max_charge_power = int(user_input["max_charge_power"])
+            max_discharge_power = int(user_input["max_discharge_power"])
+            ok = await VictronEssDriver.probe(host, port, vebus_unit_id, system_unit_id)
+            if not ok:
+                errors["base"] = "cannot_connect"
+            else:
+                self._current_battery_data.update({
+                    CONF_NAME: user_input[CONF_NAME],
+                    CONF_HOST: host,
+                    CONF_PORT: port,
+                    "victron_vebus_unit_id": vebus_unit_id,
+                    "victron_system_unit_id": system_unit_id,
+                    "max_charge_power": max_charge_power,
+                    "max_discharge_power": max_discharge_power,
+                    "brand": "victron",
+                })
+                return await self.async_step_battery_limits()
+
+        return self.async_show_form(
+            step_id="battery_connection_victron",
+            data_schema=_victron_connection_schema(battery_num),
+            errors=errors,
             description_placeholders={"battery_num": str(battery_num)},
         )
 
@@ -2337,6 +2440,8 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             max_charge_power, max_discharge_power = _hoymiles_power_ceilings(self._current_battery_data)
         elif brand == "huawei":
             max_charge_power, max_discharge_power = _huawei_power_ceilings(self._current_battery_data)
+        elif brand == "victron":
+            max_charge_power, max_discharge_power = _victron_power_ceilings(self._current_battery_data)
         else:
             battery_version = self._current_battery_data.get(CONF_BATTERY_VERSION, DEFAULT_VERSION)
             max_charge_power = max_discharge_power = max_power_for_battery_version(
@@ -2366,6 +2471,11 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                     charge_w, discharge_w = _anker_power_ceilings(self._current_battery_data)
                     merged["max_charge_power"] = charge_w
                     merged["max_discharge_power"] = discharge_w
+                elif brand == "victron":
+                    # Already collected in the connection step; no form field here.
+                    charge_w, discharge_w = _victron_power_ceilings(self._current_battery_data)
+                    merged["max_charge_power"] = charge_w
+                    merged["max_discharge_power"] = discharge_w
                 else:
                     merged["max_charge_power"] = int(user_input["max_charge_power"])
                     merged["max_discharge_power"] = int(user_input["max_discharge_power"])
@@ -2385,10 +2495,10 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                     user_input.get(CONF_DC_PV_CONNECTED, True)
                 ) if merged.get(CONF_BATTERY_VERSION) in ("vA", "vD") else False
                 merged[CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED] = (
-                    False if brand in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt")
+                    False if brand in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt", "victron")
                     else user_input.get(CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED, DEFAULT_FULL_CHARGE_VOLTAGE_TAPER_ENABLED)
                 )
-                if brand in ("zendure", "sessy", "hoymiles"):
+                if brand in ("zendure", "sessy", "hoymiles", "victron"):
                     capacity_default = (
                         _hoymiles_capacity_default(self._current_battery_data)
                         if brand == "hoymiles" else 0.0
@@ -2404,7 +2514,7 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                 return await self.async_step_battery_brand()
 
         _schema: dict = {}
-        if brand != "anker":
+        if brand not in ("anker", "victron"):
             default_charge = max(
                 100,
                 min(max_charge_power, int(self._current_battery_data.get("max_charge_power", max_charge_power))),
@@ -2436,10 +2546,10 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             and self._current_battery_data.get(CONF_BATTERY_VERSION) in ("vA", "vD")
         ):
             _schema[vol.Required(CONF_DC_PV_CONNECTED, default=True)] = BooleanSelector()
-        if brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt"):
+        if brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt", "victron"):
             _schema[vol.Required(CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED, default=DEFAULT_FULL_CHARGE_VOLTAGE_TAPER_ENABLED)] = bool
-        if brand == "sessy":
-            # Sessy does not report a nominal capacity or identifiable packs.
+        if brand in ("sessy", "victron"):
+            # Neither reports a nominal capacity or identifiable packs.
             _schema[vol.Required("battery_capacity_kwh")] = NumberSelector(
                 NumberSelectorConfig(min=0.01, max=100, step=0.01, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
             )
@@ -4360,6 +4470,8 @@ class OptionsFlowHandler(OptionsFlow):
                 return await self.async_step_battery_connection_huawei()
             if brand == "hoymiles":
                 return await self.async_step_battery_connection_hoymiles()
+            if brand == "victron":
+                return await self.async_step_battery_connection_victron()
             return await self.async_step_battery_connection()
 
         return self.async_show_form(
@@ -4377,6 +4489,7 @@ class OptionsFlowHandler(OptionsFlow):
                                 {"value": "indevolt", "label": "Indevolt SolidFlex / PowerFlex"},
                                 {"value": "hoymiles", "label": "Hoymiles MQTT"},
                                 {"value": "huawei", "label": "Huawei SUN2000 + LUNA2000"},
+                                {"value": "victron", "label": "Victron Multiplus/Quattro (ESS external control)"},
                             ],
                             mode=SelectSelectorMode.DROPDOWN,
                         )),
@@ -5043,6 +5156,53 @@ class OptionsFlowHandler(OptionsFlow):
             description_placeholders={"battery_num": str(battery_num)},
         )
 
+    async def async_step_battery_connection_victron(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure connection details for a Victron ESS (add or edit)."""
+        errors: dict[str, str] = {}
+        try:
+            battery_num = self.battery_index + 1
+            current_batteries = self.config_entry.data.get("batteries", [])
+
+            if user_input is not None:
+                host = user_input[CONF_HOST]
+                port = int(user_input.get(CONF_PORT, 502))
+                vebus_unit_id = int(user_input["victron_vebus_unit_id"])
+                system_unit_id = int(user_input.get("victron_system_unit_id", 100))
+                max_charge_power = int(user_input["max_charge_power"])
+                max_discharge_power = int(user_input["max_discharge_power"])
+                ok = await VictronEssDriver.probe(host, port, vebus_unit_id, system_unit_id)
+                if not ok:
+                    errors["base"] = "cannot_connect"
+                else:
+                    self._current_battery_data.update({
+                        CONF_NAME: user_input[CONF_NAME],
+                        CONF_HOST: host,
+                        CONF_PORT: port,
+                        "victron_vebus_unit_id": vebus_unit_id,
+                        "victron_system_unit_id": system_unit_id,
+                        "max_charge_power": max_charge_power,
+                        "max_discharge_power": max_discharge_power,
+                        "brand": "victron",
+                    })
+                    return await self.async_step_battery_limits()
+
+            saved = (
+                current_batteries[self.battery_index]
+                if self.battery_index < len(current_batteries) else None
+            )
+        except Exception as e:
+            _LOGGER.error("Error in options flow battery_connection_victron step: %s", e, exc_info=True)
+            return self.async_abort(reason="unknown_error")
+
+        return self.async_show_form(
+            step_id="battery_connection_victron",
+            data_schema=_victron_connection_schema(battery_num, saved),
+            errors=errors,
+            description_placeholders={"battery_num": str(battery_num)},
+        )
+
     async def async_step_battery_limits(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Configure power and SOC limits for the current battery."""
         errors: dict[str, str] = {}
@@ -5066,6 +5226,8 @@ class OptionsFlowHandler(OptionsFlow):
                 max_charge_power, max_discharge_power = _hoymiles_power_ceilings(self._current_battery_data)
             elif brand == "huawei":
                 max_charge_power, max_discharge_power = _huawei_power_ceilings(self._current_battery_data)
+            elif brand == "victron":
+                max_charge_power, max_discharge_power = _victron_power_ceilings(self._current_battery_data)
             else:
                 battery_version = self._current_battery_data.get(CONF_BATTERY_VERSION, DEFAULT_VERSION)
                 max_charge_power = max_discharge_power = max_power_for_battery_version(
@@ -5106,6 +5268,10 @@ class OptionsFlowHandler(OptionsFlow):
                     charge_w, discharge_w = _anker_power_ceilings(merged)
                     merged["max_charge_power"] = charge_w
                     merged["max_discharge_power"] = discharge_w
+                elif brand == "victron":
+                    charge_w, discharge_w = _victron_power_ceilings(merged)
+                    merged["max_charge_power"] = charge_w
+                    merged["max_discharge_power"] = discharge_w
                 else:
                     merged["max_charge_power"] = int(user_input["max_charge_power"])
                     merged["max_discharge_power"] = int(user_input["max_discharge_power"])
@@ -5128,10 +5294,10 @@ class OptionsFlowHandler(OptionsFlow):
                     user_input.get(CONF_DC_PV_CONNECTED, True)
                 ) if merged.get(CONF_BATTERY_VERSION) in ("vA", "vD") else False
                 merged[CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED] = (
-                    False if brand in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt")
+                    False if brand in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt", "victron")
                     else user_input.get(CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED, DEFAULT_FULL_CHARGE_VOLTAGE_TAPER_ENABLED)
                 )
-                if brand in ("zendure", "sessy", "hoymiles"):
+                if brand in ("zendure", "sessy", "hoymiles", "victron"):
                     capacity_default = (
                         _hoymiles_capacity_default(self._current_battery_data)
                         if brand == "hoymiles" else 0.0
@@ -5212,7 +5378,7 @@ class OptionsFlowHandler(OptionsFlow):
             return self.async_abort(reason="unknown_error")
 
         _schema: dict = {}
-        if brand != "anker":
+        if brand not in ("anker", "victron"):
             _schema[vol.Required("max_charge_power", default=defaults["max_charge_power"])] = NumberSelector(
                 NumberSelectorConfig(min=100, max=max_charge_power, step=50, unit_of_measurement="W", mode=NumberSelectorMode.SLIDER)
             )
@@ -5239,9 +5405,9 @@ class OptionsFlowHandler(OptionsFlow):
                     default=defaults[CONF_DC_PV_CONNECTED],
                 )
             ] = BooleanSelector()
-        if brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt"):
+        if brand not in ("zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt", "victron"):
             _schema[vol.Required(CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED, default=defaults[CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED])] = bool
-        if brand == "sessy":
+        if brand in ("sessy", "victron"):
             saved_capacity = float(defaults["battery_capacity_kwh"])
             capacity_field = (
                 vol.Required("battery_capacity_kwh", default=saved_capacity)
