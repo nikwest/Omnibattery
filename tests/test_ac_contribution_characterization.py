@@ -453,6 +453,7 @@ def test_every_variant_is_in_the_table():
     assert {v for v, _ in GOLDEN} == set(VARIANTS)
     assert {BRAND for BRAND in BRAND_CONFIGS} == {
         "marstek", "zendure", "esphome", "anker", "sessy", "indevolt", "huawei", "hoymiles",
+        "victron",
     }
 
 

@@ -21,6 +21,8 @@ Drivers:
     services (SUN2000 + LUNA2000).
   - ``indevolt``: local HTTP, paced scheduler, realtime RAM tuple only
     (SolidFlex / PowerFlex).
+  - ``victron``: Modbus-TCP to a GX device, set-points via ESS external
+    control (Multiplus/Quattro); GX values named by D-Bus service + path.
   - ``generic_ha``: HA-entity based, push, read-only (a battery another
     integration already reports; never commanded).
 

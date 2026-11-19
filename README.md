@@ -11,6 +11,7 @@
 - Hoymiles MS-A2 and HiBattery MQTT models
 - Indevolt SolidFlex 1200, 2000, 3000 and 3600, and PowerFlex 1200, 2000 and 3000 (Local HTTP API)
 - Huawei SUN2000 inverters with LUNA2000 batteries via Modbus TCP
+- Victron Multiplus/Quattro with a communicating battery, via ESS external control (Experimental — looking for testers!!!)
 - APsystems EZHI (Local HTTP API, thanks @funonwheels!)
 - Any other battery another Home Assistant integration already reads, monitored only (no power control)
 

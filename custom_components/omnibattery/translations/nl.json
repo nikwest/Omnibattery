@@ -720,6 +720,24 @@
           "slave_id": "Modbus slave/unit id (default 1)"
         }
       },
+      "reconfigure_battery_victron": {
+        "title": "Reconfigure battery {battery_num} — Connection (Victron)",
+        "description": "Update the GX device's address and the unit ids for Victron battery {battery_num}. All other settings are preserved, including the power limits — change those in the integration's options.",
+        "data": {
+          "name": "Name",
+          "host": "IP Address",
+          "port": "Modbus Port",
+          "victron_vebus_unit_id": "Multiplus/Quattro (vebus) unit id",
+          "victron_system_unit_id": "System unit id"
+        },
+        "data_description": {
+          "name": "Descriptive name to identify this battery",
+          "host": "Address of the GX device, not the Multiplus/Quattro itself",
+          "port": "Modbus TCP port (default 502)",
+          "victron_vebus_unit_id": "Unit id of the vebus (Multiplus/Quattro) service",
+          "victron_system_unit_id": "Unit id of the system aggregate service — 100 is Victron's documented default; only change it if your GX device answers elsewhere"
+        }
+      },
           "reconfigure_battery_huawei_slave": {
             "title": "Batterij {battery_num} opnieuw configureren — Welke omvormer?",
             "description": "{count} omvormers met batterij hebben op deze bus geantwoord. Kies degene waar deze batterij bij hoort.",
@@ -855,6 +873,28 @@
         "description": "{count} inverters with a battery answered on this Modbus endpoint. Huawei inverters can be cascaded — pick the one this battery belongs to. For a second battery, add another entry with the other slave id.",
         "data": {"slave_id": "Inverter"}
       },
+      "battery_connection_victron": {
+        "title": "Configure battery {battery_num} — Connection (Victron)",
+        "description": "Battery {battery_num} is a Multiplus/Quattro behind a Victron GX device (Cerbo GX, Venus GX, or Venus OS), driven through ESS external control. Enter the GX device's own address, not the Multi's — it has no network connection of its own. Find the vebus unit id under Settings → Services → Modbus/TCP → Available services on the GX device; it is not guessable and varies per installation. The system unit id defaults to 100, Victron's own documented default for the system aggregate — leave it unless your GX device answers elsewhere. Before this works, set Settings → ESS → Mode to \"External control\" on the GX device.",
+        "data": {
+          "name": "Name",
+          "host": "IP Address",
+          "port": "Modbus Port",
+          "victron_vebus_unit_id": "Multiplus/Quattro (vebus) unit id",
+          "victron_system_unit_id": "System unit id",
+          "max_charge_power": "Max Charge Power (W)",
+          "max_discharge_power": "Max Discharge Power (W)"
+        },
+        "data_description": {
+          "name": "Descriptive name to identify this battery",
+          "host": "Address of the GX device, not the Multiplus/Quattro itself",
+          "port": "Modbus TCP port (default 502)",
+          "victron_vebus_unit_id": "Unit id of the vebus (Multiplus/Quattro) service",
+          "victron_system_unit_id": "Unit id of the system aggregate service — 100 is Victron's documented default; only change it if your GX device answers elsewhere",
+          "max_charge_power": "Safe charge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately",
+          "max_discharge_power": "Safe discharge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Enter connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -875,6 +915,9 @@
     "error": {
       "invalid_mac": "Dit lijkt geen MAC-adres te zijn. Er worden zes paren hexadecimale cijfers verwacht, bijvoorbeeld dc:04:5a:14:6b:33.",
       "cannot_connect": "Kan geen verbinding maken met de batterij. Controleer het IP-adres en of de batterij toegankelijk is op het netwerk.",
+      "victron_system_unit_id": "The GX device answers, but not on the system unit id: no battery state of charge can be read there. Leave it at 100 unless your GX device's Modbus/TCP service list names another unit id for the system service (com.victronenergy.system).",
+      "victron_vebus_unit_id": "The GX device answers, but the Multiplus/Quattro does not on the vebus unit id. Check the unit id listed for the vebus service under Settings → Services → Modbus/TCP → Available services on the GX device.",
+      "victron_no_ess": "The Multiplus/Quattro answers, but has no ESS control registers: the ESS assistant is not installed on it. Install it with VictronConnect or VEConfigure, then set Settings → ESS → Mode to \"External control\" on the GX device.",
       "hoymiles_no_power_ctrl": "Deze MQTT-apparaat-ID publiceert telemetrie maar geen vermogensregeling. In een gekoppeld Hoymiles-systeem is alleen de master aanstuurbaar: voeg de apparaat-ID van de master één keer toe, niet die van de slave.",
       "indevolt_http_digest": "De batterij vraagt om een wachtwoord: de lokale API staat op HTTP Digest. Kies HTTP in de Indevolt-app en probeer het opnieuw.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",
@@ -1549,6 +1592,28 @@
         "description": "{count} inverters with a battery answered on this Modbus endpoint. Huawei inverters can be cascaded — pick the one this battery belongs to. For a second battery, add another entry with the other slave id.",
         "data": {"slave_id": "Inverter"}
       },
+      "battery_connection_victron": {
+        "title": "Configure battery {battery_num} — Connection (Victron)",
+        "description": "Battery {battery_num} is a Multiplus/Quattro behind a Victron GX device (Cerbo GX, Venus GX, or Venus OS), driven through ESS external control. Enter the GX device's own address, not the Multi's — it has no network connection of its own. Find the vebus unit id under Settings → Services → Modbus/TCP → Available services on the GX device; it is not guessable and varies per installation. The system unit id defaults to 100, Victron's own documented default for the system aggregate — leave it unless your GX device answers elsewhere. Before this works, set Settings → ESS → Mode to \"External control\" on the GX device.",
+        "data": {
+          "name": "Name",
+          "host": "IP Address",
+          "port": "Modbus Port",
+          "victron_vebus_unit_id": "Multiplus/Quattro (vebus) unit id",
+          "victron_system_unit_id": "System unit id",
+          "max_charge_power": "Max Charge Power (W)",
+          "max_discharge_power": "Max Discharge Power (W)"
+        },
+        "data_description": {
+          "name": "Descriptive name to identify this battery",
+          "host": "Address of the GX device, not the Multiplus/Quattro itself",
+          "port": "Modbus TCP port (default 502)",
+          "victron_vebus_unit_id": "Unit id of the vebus (Multiplus/Quattro) service",
+          "victron_system_unit_id": "Unit id of the system aggregate service — 100 is Victron's documented default; only change it if your GX device answers elsewhere",
+          "max_charge_power": "Safe charge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately",
+          "max_discharge_power": "Safe discharge ceiling for this installation — there is no hardware-reported value to check this against, so enter it deliberately"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Modify connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -1569,6 +1634,9 @@
     "error": {
       "invalid_mac": "Dit lijkt geen MAC-adres te zijn. Er worden zes paren hexadecimale cijfers verwacht, bijvoorbeeld dc:04:5a:14:6b:33.",
       "cannot_connect": "Kan geen verbinding maken met de batterij. Controleer het IP-adres en of de batterij toegankelijk is op het netwerk.",
+      "victron_system_unit_id": "The GX device answers, but not on the system unit id: no battery state of charge can be read there. Leave it at 100 unless your GX device's Modbus/TCP service list names another unit id for the system service (com.victronenergy.system).",
+      "victron_vebus_unit_id": "The GX device answers, but the Multiplus/Quattro does not on the vebus unit id. Check the unit id listed for the vebus service under Settings → Services → Modbus/TCP → Available services on the GX device.",
+      "victron_no_ess": "The Multiplus/Quattro answers, but has no ESS control registers: the ESS assistant is not installed on it. Install it with VictronConnect or VEConfigure, then set Settings → ESS → Mode to \"External control\" on the GX device.",
       "hoymiles_no_power_ctrl": "Deze MQTT-apparaat-ID publiceert telemetrie maar geen vermogensregeling. In een gekoppeld Hoymiles-systeem is alleen de master aanstuurbaar: voeg de apparaat-ID van de master één keer toe, niet die van de slave.",
       "indevolt_http_digest": "De batterij vraagt om een wachtwoord: de lokale API staat op HTTP Digest. Kies HTTP in de Indevolt-app en probeer het opnieuw.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",
@@ -1791,6 +1859,12 @@
       },
       "hourly_balance": {
         "name": "Nettosaldo"
+      },
+      "disable_charge": {
+        "name": "ESS Laden uitschakelen"
+      },
+      "disable_feedin": {
+        "name": "ESS Teruglevering uitschakelen"
       },
       "weekly_full_charge_enabled": {
         "name": "Wekelijkse volledige lading"
@@ -2508,6 +2582,15 @@
       },
       "inverter_ac_power": {
         "name": "Omvormer AC-vermogen"
+      },
+      "ac_power_setpoint": {
+        "name": "ESS AC-vermogensinstelpunt"
+      },
+      "ac_out_load": {
+        "name": "AC-uitgangsvermogen"
+      },
+      "ess_control_mode": {
+        "name": "ESS-regelmodus"
       },
       "charging_cutoff_capacity": {
         "name": "Laadafkapgrens"

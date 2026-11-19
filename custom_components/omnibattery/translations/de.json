@@ -720,6 +720,24 @@
           "slave_id": "Modbus slave/unit id (default 1)"
         }
       },
+      "reconfigure_battery_victron": {
+        "title": "Batterie {battery_num} neu konfigurieren — Verbindung (Victron)",
+        "description": "Aktualisiere die Adresse des GX-Geräts und die Unit-IDs für die Victron-Batterie {battery_num}. Alle anderen Einstellungen bleiben erhalten, auch die Leistungsgrenzen — diese änderst du in den Optionen der Integration.",
+        "data": {
+          "name": "Name",
+          "host": "IP-Adresse",
+          "port": "Modbus-Port",
+          "victron_vebus_unit_id": "Unit-ID des Multiplus/Quattro (vebus)",
+          "victron_system_unit_id": "System-Unit-ID"
+        },
+        "data_description": {
+          "name": "Sprechender Name für diese Batterie",
+          "host": "Adresse des GX-Geräts, nicht des Multiplus/Quattro selbst",
+          "port": "Modbus-TCP-Port (Standard 502)",
+          "victron_vebus_unit_id": "Unit-ID des vebus-Dienstes (Multiplus/Quattro)",
+          "victron_system_unit_id": "Unit-ID des Systemdienstes — 100 ist Victrons dokumentierter Standard; nur ändern, wenn dein GX-Gerät unter einer anderen antwortet"
+        }
+      },
           "reconfigure_battery_huawei_slave": {
             "title": "Batterie {battery_num} neu konfigurieren — Welcher Wechselrichter?",
             "description": "An diesem Bus haben {count} Wechselrichter mit Batterie geantwortet. Wähle den, zu dem diese Batterie gehört.",
@@ -855,6 +873,28 @@
         "description": "Auf diesem Modbus-Zugang haben {count} Wechselrichter mit Batterie geantwortet. Huawei-Wechselrichter lassen sich kaskadieren — wähle den, zu dem diese Batterie gehört. Für eine zweite Batterie legst du einen weiteren Eintrag mit der anderen Slave-ID an.",
         "data": {"slave_id": "Wechselrichter"}
       },
+      "battery_connection_victron": {
+        "title": "Batterie {battery_num} einrichten — Verbindung (Victron)",
+        "description": "Batterie {battery_num} ist ein Multiplus/Quattro hinter einem Victron-GX-Gerät (Cerbo GX, Venus GX oder Venus OS), gesteuert über ESS External Control. Trage die Adresse des GX-Geräts ein, nicht die des Multi — der hat keine eigene Netzwerkverbindung. Die vebus-Unit-ID steht auf dem GX-Gerät unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste; sie lässt sich nicht erraten und ist je Installation verschieden. Die System-Unit-ID ist standardmäßig 100, Victrons dokumentierter Standard für den Systemdienst — lass sie so, außer dein GX-Gerät antwortet unter einer anderen. Damit das funktioniert, stelle auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
+        "data": {
+          "name": "Name",
+          "host": "IP-Adresse",
+          "port": "Modbus-Port",
+          "victron_vebus_unit_id": "Unit-ID des Multiplus/Quattro (vebus)",
+          "victron_system_unit_id": "System-Unit-ID",
+          "max_charge_power": "Max. Ladeleistung (W)",
+          "max_discharge_power": "Max. Entladeleistung (W)"
+        },
+        "data_description": {
+          "name": "Sprechender Name für diese Batterie",
+          "host": "Adresse des GX-Geräts, nicht des Multiplus/Quattro selbst",
+          "port": "Modbus-TCP-Port (Standard 502)",
+          "victron_vebus_unit_id": "Unit-ID des vebus-Dienstes (Multiplus/Quattro)",
+          "victron_system_unit_id": "Unit-ID des Systemdienstes — 100 ist Victrons dokumentierter Standard; nur ändern, wenn dein GX-Gerät unter einer anderen antwortet",
+          "max_charge_power": "Sichere Ladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen",
+          "max_discharge_power": "Sichere Entladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Enter connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -875,6 +915,9 @@
     "error": {
       "invalid_mac": "Das sieht nicht wie eine MAC-Adresse aus. Erwartet werden sechs Paare hexadezimaler Ziffern, zum Beispiel dc:04:5a:14:6b:33.",
       "cannot_connect": "Verbindung zur Batterie nicht möglich. Überprüfen Sie die IP-Adresse und dass die Batterie im Netzwerk erreichbar ist.",
+      "victron_system_unit_id": "Das GX-Gerät antwortet, aber nicht unter der System-Unit-ID: Dort lässt sich kein Ladezustand lesen. Lassen Sie sie auf 100, es sei denn, die Modbus/TCP-Dienstliste Ihres GX-Geräts nennt für den Systemdienst (com.victronenergy.system) eine andere Unit-ID.",
+      "victron_vebus_unit_id": "Das GX-Gerät antwortet, aber der Multiplus/Quattro nicht unter der vebus-Unit-ID. Prüfen Sie die Unit-ID des vebus-Dienstes unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste auf dem GX-Gerät.",
+      "victron_no_ess": "Der Multiplus/Quattro antwortet, hat aber keine ESS-Steuerregister: Der ESS-Assistent ist darauf nicht installiert. Installieren Sie ihn mit VictronConnect oder VEConfigure und stellen Sie dann auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
       "hoymiles_no_power_ctrl": "Diese MQTT-Geräte-ID sendet Telemetrie, aber keine Leistungssteuerung. In einem gekoppelten Hoymiles-System ist nur der Master steuerbar: Füge die Geräte-ID des Masters einmal hinzu, nicht die des Slaves.",
       "indevolt_http_digest": "Die Batterie verlangt ein Passwort: Die lokale API steht auf HTTP Digest. Wähle in der Indevolt-App HTTP und versuche es erneut.",
       "no_battery": "Wechselrichter erreichbar, meldet aber keine Batterie. Prüfe, ob die LUNA2000 angeschlossen ist und die Modbus-Slave-ID auf den Wechselrichter zeigt.",
@@ -1549,6 +1592,28 @@
         "description": "Auf diesem Modbus-Zugang haben {count} Wechselrichter mit Batterie geantwortet. Huawei-Wechselrichter lassen sich kaskadieren — wähle den, zu dem diese Batterie gehört. Für eine zweite Batterie legst du einen weiteren Eintrag mit der anderen Slave-ID an.",
         "data": {"slave_id": "Wechselrichter"}
       },
+      "battery_connection_victron": {
+        "title": "Batterie {battery_num} einrichten — Verbindung (Victron)",
+        "description": "Batterie {battery_num} ist ein Multiplus/Quattro hinter einem Victron-GX-Gerät (Cerbo GX, Venus GX oder Venus OS), gesteuert über ESS External Control. Trage die Adresse des GX-Geräts ein, nicht die des Multi — der hat keine eigene Netzwerkverbindung. Die vebus-Unit-ID steht auf dem GX-Gerät unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste; sie lässt sich nicht erraten und ist je Installation verschieden. Die System-Unit-ID ist standardmäßig 100, Victrons dokumentierter Standard für den Systemdienst — lass sie so, außer dein GX-Gerät antwortet unter einer anderen. Damit das funktioniert, stelle auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
+        "data": {
+          "name": "Name",
+          "host": "IP-Adresse",
+          "port": "Modbus-Port",
+          "victron_vebus_unit_id": "Unit-ID des Multiplus/Quattro (vebus)",
+          "victron_system_unit_id": "System-Unit-ID",
+          "max_charge_power": "Max. Ladeleistung (W)",
+          "max_discharge_power": "Max. Entladeleistung (W)"
+        },
+        "data_description": {
+          "name": "Sprechender Name für diese Batterie",
+          "host": "Adresse des GX-Geräts, nicht des Multiplus/Quattro selbst",
+          "port": "Modbus-TCP-Port (Standard 502)",
+          "victron_vebus_unit_id": "Unit-ID des vebus-Dienstes (Multiplus/Quattro)",
+          "victron_system_unit_id": "Unit-ID des Systemdienstes — 100 ist Victrons dokumentierter Standard; nur ändern, wenn dein GX-Gerät unter einer anderen antwortet",
+          "max_charge_power": "Sichere Ladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen",
+          "max_discharge_power": "Sichere Entladeobergrenze für diese Installation — die Hardware meldet keinen Wert, gegen den sie sich prüfen ließe, also bewusst eintragen"
+        }
+      },
       "battery_connection_anker": {
         "title": "Configure battery {battery_num} — Connection (Anker)",
         "description": "Modify connection details for Anker SOLIX Solarbank Max AC / 4 E5000 Pro battery {battery_num}. Enable Modbus TCP under Third-Party Control in the Anker app first. Only one Modbus client can connect at a time.",
@@ -1569,6 +1634,9 @@
     "error": {
       "invalid_mac": "Das sieht nicht wie eine MAC-Adresse aus. Erwartet werden sechs Paare hexadezimaler Ziffern, zum Beispiel dc:04:5a:14:6b:33.",
       "cannot_connect": "Verbindung zur Batterie nicht möglich. Überprüfen Sie die IP-Adresse und dass die Batterie im Netzwerk erreichbar ist.",
+      "victron_system_unit_id": "Das GX-Gerät antwortet, aber nicht unter der System-Unit-ID: Dort lässt sich kein Ladezustand lesen. Lassen Sie sie auf 100, es sei denn, die Modbus/TCP-Dienstliste Ihres GX-Geräts nennt für den Systemdienst (com.victronenergy.system) eine andere Unit-ID.",
+      "victron_vebus_unit_id": "Das GX-Gerät antwortet, aber der Multiplus/Quattro nicht unter der vebus-Unit-ID. Prüfen Sie die Unit-ID des vebus-Dienstes unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste auf dem GX-Gerät.",
+      "victron_no_ess": "Der Multiplus/Quattro antwortet, hat aber keine ESS-Steuerregister: Der ESS-Assistent ist darauf nicht installiert. Installieren Sie ihn mit VictronConnect oder VEConfigure und stellen Sie dann auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
       "hoymiles_no_power_ctrl": "Diese MQTT-Geräte-ID sendet Telemetrie, aber keine Leistungssteuerung. In einem gekoppelten Hoymiles-System ist nur der Master steuerbar: Füge die Geräte-ID des Masters einmal hinzu, nicht die des Slaves.",
       "indevolt_http_digest": "Die Batterie verlangt ein Passwort: Die lokale API steht auf HTTP Digest. Wähle in der Indevolt-App HTTP und versuche es erneut.",
       "no_battery": "Wechselrichter erreichbar, meldet aber keine Batterie. Prüfe, ob die LUNA2000 angeschlossen ist und die Modbus-Slave-ID auf den Wechselrichter zeigt.",
@@ -1791,6 +1859,12 @@
       },
       "hourly_balance": {
         "name": "Netto-Balance"
+      },
+      "disable_charge": {
+        "name": "ESS Laden sperren"
+      },
+      "disable_feedin": {
+        "name": "ESS Einspeisung sperren"
       },
       "weekly_full_charge_enabled": {
         "name": "Wöchentliche Vollladung"
@@ -2508,6 +2582,15 @@
       },
       "inverter_ac_power": {
         "name": "Wechselrichter-AC-Leistung"
+      },
+      "ac_power_setpoint": {
+        "name": "ESS AC-Leistungssollwert"
+      },
+      "ac_out_load": {
+        "name": "AC-Ausgangsleistung"
+      },
+      "ess_control_mode": {
+        "name": "ESS-Steuermodus"
       },
       "charging_cutoff_capacity": {
         "name": "Ladeschlussgrenze"

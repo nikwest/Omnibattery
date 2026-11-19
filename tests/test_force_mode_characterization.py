@@ -97,7 +97,7 @@ _OWN_DECODE = {**_GENERIC, "charge_negative": -5.0, "charge_float": 700.0}
 EXPECTED_COMMANDED = {
     "marstek": _OWN_DECODE, "esphome": _OWN_DECODE, "huawei": _OWN_DECODE,
     "zendure": _GENERIC, "anker": _GENERIC, "sessy": _GENERIC,
-    "indevolt": _GENERIC, "hoymiles": _GENERIC,
+    "indevolt": _GENERIC, "hoymiles": _GENERIC, "victron": _GENERIC,
 }
 
 
@@ -160,6 +160,7 @@ EXPECTED_CRITICAL = {
         ["battery_power", "battery_soc", "force_mode", "inverter_state",
          "set_charge_power", "set_discharge_power"], [19, 6]),
     "hoymiles": (["battery_power", "battery_soc", "inverter_state"], [16]),
+    "victron": (["battery_power", "battery_soc"], [4]),
 }
 
 
