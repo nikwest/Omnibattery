@@ -74,6 +74,10 @@ def _old_soc_selector_limits(brand, battery_version="v2"):
         min_lo, min_hi, min_default = 0, 30, 10
     elif brand == "huawei":
         min_lo, min_hi, min_default = 0, 30, 10
+    elif brand == "victron":
+        # Added with the brand; the same branch it had in the pre-registry
+        # function on the 1.x line.
+        min_lo, min_hi, min_default = 0, 30, 10
     else:
         min_lo, min_hi, min_default = 12, 30, 12
         # fixed: plan section 8 T1.1: an unregistered brand is served by the Marstek driver.
@@ -106,6 +110,7 @@ TRAIT_TABLE = {
     "indevolt": ("none", (5, 50, 20)),
     "hoymiles": ("optional", (0, 30, 10)),
     "huawei": ("none", (0, 30, 10)),
+    "victron": ("required", (0, 30, 10)),
 }
 
 

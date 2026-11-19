@@ -17,6 +17,7 @@ from .huawei import HuaweiSolarDriver
 from .indevolt import IndevoltDriver
 from .marstek import MarstekModbusDriver
 from .sessy import SessyLocalDriver
+from .victron import VictronEssDriver
 from .zendure import ZendureLocalDriver
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ DRIVERS: dict[str, type[BatteryDriver]] = {
     "indevolt": IndevoltDriver,
     "hoymiles": HoymilesMqttDriver,
     "huawei": HuaweiSolarDriver,
+    "victron": VictronEssDriver,
 }
 DEFAULT_BRAND = "marstek"
 

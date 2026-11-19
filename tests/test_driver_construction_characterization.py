@@ -50,6 +50,7 @@ from custom_components.omnibattery.drivers.huawei import HuaweiSolarDriver
 from custom_components.omnibattery.drivers.indevolt import IndevoltDriver
 from custom_components.omnibattery.drivers.marstek import MarstekModbusDriver
 from custom_components.omnibattery.drivers.sessy import SessyLocalDriver
+from custom_components.omnibattery.drivers.victron import VictronEssDriver
 from custom_components.omnibattery.drivers.zendure import ZendureLocalDriver
 from custom_components.omnibattery.infra.coordinator import (
     MarstekVenusDataUpdateCoordinator,
@@ -138,10 +139,12 @@ HUAWEI = _config("huawei", slave_id=3, huawei_battery_device_id="dev123",
                  huawei_direct_write=True, huawei_emma_slave_id=0,
                  max_charge_power=5000, max_discharge_power=5000)
 HOYMILES = _config("hoymiles", host="device-id-1", port=0, hoymiles_model="MS-A2")
+VICTRON = _config("victron", victron_vebus_unit_id=227, victron_system_unit_id=100)
 
 BRAND_CONFIGS = {
     "marstek": MARSTEK, "zendure": ZENDURE, "esphome": ESPHOME, "anker": ANKER,
     "sessy": SESSY, "indevolt": INDEVOLT, "huawei": HUAWEI, "hoymiles": HOYMILES,
+    "victron": VICTRON,
 }
 
 
@@ -263,6 +266,20 @@ EXPECTED = {
         # The Hoymiles driver reports its device id as the serial number.
         {"manufacturer": "Hoymiles", "model": "MS-A2", "serial_number": "device-id-1"},
     ),
+    "victron": (
+        VictronEssDriver,
+        {"host": "192.0.2.10", "port": 502},
+        {
+            "battery_version": None, "dc_pv_connected": False,
+            "full_charge_voltage_taper_enabled": False,
+            "needs_software_power_cap": False, "needs_software_max_charge": True,
+            "needs_software_max_discharge": True, "needs_software_manual_control": True,
+            "device_max_charge_power": 2000, "device_max_discharge_power": 2000,
+            "configured_max_charge_power": 2000, "configured_max_discharge_power": 2000,
+        },
+        {"manufacturer": "Victron", "model": "Victron ESS (Multiplus/Quattro)",
+         "configuration_url": "http://192.0.2.10/"},
+    ),
 }
 
 
@@ -312,6 +329,7 @@ async def test_brand_device_info(brand):
         ("indevolt", "192.0.2.10_8080"),
         ("huawei", "192.0.2.10_502_3"),
         ("hoymiles", "device-id-1_0"),
+        ("victron", "192.0.2.10_502"),
     ],
 )
 async def test_device_key_per_brand(brand, device_key):
@@ -324,7 +342,7 @@ async def test_device_key_per_brand(brand, device_key):
         ("sessy", True), ("indevolt", True),
         # Only these two brands write the firmware line (#19).
         ("marstek", False), ("zendure", False), ("anker", False), ("esphome", False),
-        ("huawei", False), ("hoymiles", False),
+        ("huawei", False), ("hoymiles", False), ("victron", False),
     ],
 )
 async def test_sw_version_only_for_sessy_and_indevolt(brand, shows):
@@ -342,7 +360,9 @@ async def test_configuration_url_only_for_sessy_and_omits_the_default_port():
     on_8080 = _build_coordinator({**SESSY, "port": 8080})
     assert on_8080.battery_device_info["configuration_url"] == "http://192.0.2.10:8080/"
     for brand, config in BRAND_CONFIGS.items():
-        if brand != "sessy":
+        # Victron links the GX device's web interface (its own test is in
+        # tests/test_victron_driver.py); no other brand has a device page.
+        if brand not in ("sessy", "victron"):
             assert "configuration_url" not in _build_coordinator(config).battery_device_info
 
 

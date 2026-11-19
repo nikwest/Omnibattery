@@ -10,6 +10,7 @@
 - Sessy Home Battery (Looking for testers!!!)
 - Hoymiles MS-A2 and HiBattery MQTT models
 - Indevolt SolidFlex 1200, 2000, 3000 and 3600, and PowerFlex 1200, 2000 and 3000 (Local HTTP API)
+- Victron Multiplus/Quattro with a communicating battery, via ESS external control (Experimental — looking for testers!!!)
 
 ## Key Features
 
