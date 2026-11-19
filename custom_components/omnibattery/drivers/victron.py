@@ -1,21 +1,24 @@
 """Victron ESS external-control driver (Multiplus/Quattro behind a GX device).
 
-Controls the Multi through ESS "External control" (Hub-4 Mode 3). The
-register this driver writes (37, AcPowerSetpoint) targets AC-*input* power,
-not battery power, so every command is translated through the power the
-Multi currently passes on its AC-out: ``AcPowerSetpoint = battery_power_wanted
-+ ac_out_power``. See the register constants below for the full map, each
-checked against ``attributes.csv`` from ``victronenergy/dbus_modbustcp``.
+Controls the Multi through ESS "External control" (Hub-4 Mode 3). The value
+this driver writes (vebus ``/Hub4/L1/AcPowerSetpoint``) targets AC-*input*
+power, not battery power, so every command is translated through the power
+the Multi currently passes on its AC-out: ``AcPowerSetpoint =
+battery_power_wanted + ac_out_power``.
+
+The driver names GX values by D-Bus service + path and leaves the protocol
+to a ``GxTransport`` (``victron_transport.py``): Modbus-TCP today, with its
+register map and its quirks kept there.
 
 The Multi holds the last written AC-in figure, not the battery intent behind
 it, so the translation has to follow the AC-out power as it moves: every
-fresh AC-out reading (``read_telemetry``, ~2 s) re-derives the register value
-for the held battery target and rewrites it when it changed. The same
-rewrite doubles as the keepalive for the Multi's 60 s setpoint watchdog.
+fresh AC-out reading (``read_telemetry``, ~2 s) re-derives the setpoint for
+the held battery target and rewrites it when it changed. The same rewrite
+doubles as the keepalive for the Multi's 60 s setpoint watchdog.
 
 Three refusals are deliberate, not missing error handling: nothing is
-written while the GX answers with its invalid-value placeholder (the
-GX-validity gate, below the register constants), nor until the AC-out power
+written while the GX has no valid data (the GX-validity gate, below the
+timing constants), nor until the AC-out power
 has a fresh reading, nor until ``Hub4Mode`` is positively confirmed External
 control — an unreadable or unread check refuses exactly like a
 confirmed-wrong one, and a confirmation that stops refreshing expires.
@@ -32,13 +35,8 @@ import logging
 from dataclasses import replace
 from typing import Optional
 
-from ..infra.victron_modbus_client import (
-    VictronModbusClient,
-    decode_ascii,
-    decode_i16,
-    decode_u16,
-    encode_i16,
-)
+from ..infra.victron_modbus_client import VictronModbusClient
+from . import victron_transport as gx
 from .base import (
     BatteryDriver,
     DriverCapabilities,
@@ -46,36 +44,13 @@ from .base import (
     SetpointResult,
     TelemetrySnapshot,
 )
+from .victron_transport import GxTransport, ModbusGxTransport
 
 _LOGGER = logging.getLogger(__name__)
 
-# Every register below is verified against attributes.csv from
-# victronenergy/dbus_modbustcp — the actual table the server is built from.
+# Register numbers, scaling and the Modbus invalid-value placeholder live in
+# victron_transport.py; this module names GX values by D-Bus service + path.
 
-# --- com.victronenergy.vebus (the Multiplus/Quattro itself) -----------------
-_REG_VEBUS_AC_OUT_L1_POWER = 23        # int16, 10 W per count (Ac/Out/L1/P),
-                                       # signed: negative when something on
-                                       # AC-out feeds back into the Multi
-_AC_OUT_POWER_W_PER_COUNT = 10
-_REG_VEBUS_AC_POWER_SETPOINT_L1 = 37   # int16, W, +import/-export (Hub4/L1/AcPowerSetpoint)
-_REG_VEBUS_DISABLE_CHARGE = 38         # uint16, 0/1 (Hub4/DisableCharge)
-_REG_VEBUS_DISABLE_FEEDIN = 39         # uint16, 0/1 (Hub4/DisableFeedIn)
-# 37/38/39 are contiguous and read back as one block. They are marked
-# write-only in attributes.csv; the server's read path (verified against its
-# source) applies no such check, so reading them back works.
-# L2/L3 setpoints (40/41) are not written: single-phase only.
-
-# --- com.victronenergy.system / .settings, both unit id 100 by default ------
-_REG_SYSTEM_SERIAL = 800              # string[6] (12 bytes) — the GX device's
-                                       # own serial, not a battery-pack serial;
-                                       # there is no separate battery service
-                                       # on every installation (see below)
-_REG_SYSTEM_BATTERY_VOLTAGE = 840     # uint16, V, scale 10 — first of 4
-                                       # contiguous registers through 843, read
-                                       # as one block below
-_REG_SYSTEM_BATTERY_POWER = 842       # int16, W, +charge/-discharge
-_REG_SYSTEM_BATTERY_SOC = 843         # uint16, 0-100%
-_REG_SETTINGS_HUB4_MODE = 2902  # uint16; 3 = External control
 _HUB4_MODE_EXTERNAL_CONTROL = 3
 _HUB4_MODE_LABELS = {
     1: "ESS with phase compensation", 2: "ESS without phase compensation",
@@ -114,28 +89,16 @@ _IDLE_LOCK_DELAY_S = 30.0
 _AC_OUT_STALE_S = 10.0     # polled every ~2s
 _ESS_MODE_STALE_S = 150.0  # polled every ~30s
 
-# The GX-validity gate. dbus_modbustcp answers a register whose D-Bus value
-# is invalid with a plain 0 — a successful read, no Modbus exception
-# (Mappings::getValue: ``if (!dbusValue.isValid()) return 0;``). That happens
-# while the GX's services restart, e.g. right after its Modbus-TCP port
-# refused connections, and every such register then reads as a real 0: on
-# real hardware SOC went 67% -> 0% -> 67% within 12s, and the fleet planned
-# a grid charge for the missing 2.2 kWh. An AC-out power of 0 would equally
-# be compensated as a real one.
-#
-# Each service the driver reads is vouched for by a DC voltage it serves —
-# no running Multi sits on a 0 V battery, so 0 V means the service has no
-# valid data:
-#  * system (unit 100): /Dc/Battery/Voltage, 840, already the first register
-#    of the battery block;
-#  * vebus: /Dc/0/Voltage, 26, read in one block with AC-out power at 23.
-# A service that answers 0 V is "invalid" until it answers a real voltage
-# again; every value from it is dropped meanwhile, and register 37 is not
-# written. Both start invalid on each (re)connect. Failed reads (None) do not
-# change the gate — a connection failure already omits every value.
-_REG_VEBUS_DC_VOLTAGE = 26             # uint16, V, scale 100 (Dc/0/Voltage)
-_SYSTEM_SERVICE = "system"
-_VEBUS_SERVICE = "vebus"
+# The GX-validity gate. A GX device whose services are restarting has no
+# valid data, and the transport reports every such value as None (see
+# victron_transport.py for how Modbus, which answers it with a plain 0, is
+# made to). The witness of each service — its DC voltage, which no running
+# Multi reports as unknown — tells the driver whether that service can be
+# trusted: no setpoint is written until both can, and both start untrusted on
+# each (re)connect. Failed reads do not change the gate — a connection failure
+# already omits every value.
+_SYSTEM_SERVICE = gx.SYSTEM
+_VEBUS_SERVICE = gx.VEBUS
 
 # A backstop behind the gate for a system service that serves a real voltage
 # but no SOC yet: SOC exactly 0 after a higher reading too recent for the
@@ -153,7 +116,7 @@ SENSOR_DEFINITIONS: list[dict] = [
      "state_class": "measurement", "scale": 1, "precision": 0, "scan_interval": "high",
      "enabled_by_default": True},
     {"key": "battery_voltage", "name": "Battery Voltage", "unit": "V",
-     "device_class": "voltage", "state_class": "measurement", "scale": 0.1,
+     "device_class": "voltage", "state_class": "measurement", "scale": 1,
      "precision": 1, "category": "diagnostic", "scan_interval": "high",
      "enabled_by_default": True},
     {"key": "ac_power_setpoint", "name": "ESS AC Power Setpoint", "unit": "W",
@@ -193,12 +156,17 @@ class VictronEssDriver(BatteryDriver):
         max_charge_power_w: int,
         max_discharge_power_w: int,
         client: Optional[VictronModbusClient] = None,
+        transport: Optional[GxTransport] = None,
     ) -> None:
+        """``transport`` talks to the GX device; by default Modbus-TCP at
+        ``host``:``port`` with the two unit ids (``client`` replaces only the
+        Modbus connection underneath, for tests)."""
         self.host = host
         self.port = port
-        self._vebus_unit_id = int(vebus_unit_id)
-        self._system_unit_id = int(system_unit_id)
-        self._client = client if client is not None else VictronModbusClient(host, port)
+        self._gx: GxTransport = transport if transport is not None else ModbusGxTransport(
+            host, port,
+            vebus_unit_id=vebus_unit_id, system_unit_id=system_unit_id, client=client,
+        )
         self._shutting_down = False
         # AC-out power, for the compensation formula, plus when it was last
         # refreshed (monotonic). None until first read.
@@ -212,7 +180,7 @@ class VictronEssDriver(BatteryDriver):
         # first command and again after standby: nothing is written, and the
         # Multi stays in (or falls back to) passthrough.
         self._target_w: Optional[int] = None
-        # What register 37 was last told, and when — to skip a rewrite that
+        # What the setpoint was last told, and when — to skip a rewrite that
         # would change nothing while still feeding the watchdog on time.
         self._written_ac_in_w: Optional[int] = None
         self._written_monotonic = 0.0
@@ -221,9 +189,10 @@ class VictronEssDriver(BatteryDriver):
         # What the user's two switches ask for. Not persisted: both start
         # off after a restart.
         self._user_disable = {"disable_charge": False, "disable_feedin": False}
-        # Registers 38/39 as last written or read back; None when unknown.
+        # DisableCharge/DisableFeedIn as last written or read back; None
+        # when unknown.
         self._disable_flags: Optional[tuple[int, int]] = None
-        # The GX device's own serial (register 800), read once on connect —
+        # The GX device's own serial (system /Serial), read once on connect —
         # not polled telemetry. None until read; also keys the synthetic-
         # energy backup so a removed/re-added battery reclaims its totals.
         self._serial: Optional[str] = None
@@ -291,10 +260,10 @@ class VictronEssDriver(BatteryDriver):
 
     @property
     def connected(self) -> bool:
-        return self._client.connected
+        return self._gx.connected
 
     async def connect(self) -> bool:
-        if not await self._client.async_connect():
+        if not await self._gx.connect():
             return False
         # A fresh connection is typically a GX that just restarted its
         # services: nothing it says counts until each service has shown a
@@ -305,19 +274,17 @@ class VictronEssDriver(BatteryDriver):
         # (older Venus OS, or the register just not forwarded) must not fail
         # the connection — self._serial simply stays None, same as any driver
         # with no serial to report.
-        regs = await self._client.async_read_holding_block(
-            self._system_unit_id, _REG_SYSTEM_SERIAL, 6
-        )
-        if regs is not None:
-            self._serial = decode_ascii(regs)
+        values = await self._gx.read(gx.SYSTEM, [gx.SYSTEM_SERIAL])
+        if values is not None:
+            self._serial = values[gx.SYSTEM_SERIAL]
         return True
 
     async def close(self) -> None:
-        await self._client.async_close()
+        await self._gx.close()
 
     def set_shutting_down(self, value: bool) -> None:
         self._shutting_down = bool(value)
-        self._client.set_shutting_down(value)
+        self._gx.set_shutting_down(value)
 
     # --- telemetry (read) -------------------------------------------------
 
@@ -330,19 +297,19 @@ class VictronEssDriver(BatteryDriver):
         snapshot: TelemetrySnapshot = {}
 
         if requested is None or {"battery_soc", "battery_power", "battery_voltage"} & requested:
-            # One block covers Voltage(840)/Current(841, unused)/Power(842)/
-            # Soc(843) — contiguous on the system service, so this is a single
-            # read instead of two.
-            regs = await self._client.async_read_holding_block(
-                self._system_unit_id, _REG_SYSTEM_BATTERY_VOLTAGE, 4
-            )
-            if regs is not None and self._check_service(
-                _SYSTEM_SERVICE, decode_u16(regs, 0)
+            values = await self._gx.read(gx.SYSTEM, [
+                gx.SYSTEM_BATTERY_VOLTAGE, gx.SYSTEM_BATTERY_POWER, gx.SYSTEM_BATTERY_SOC,
+            ])
+            if values is not None and self._check_service(
+                _SYSTEM_SERVICE, values[gx.SYSTEM_BATTERY_VOLTAGE]
             ):
-                snapshot["battery_voltage"] = decode_u16(regs, 0)
-                snapshot["battery_power"] = decode_i16(regs, 2)
-                soc = decode_u16(regs, 3)
-                if not 0 <= soc <= 100:
+                snapshot["battery_voltage"] = values[gx.SYSTEM_BATTERY_VOLTAGE]
+                if values[gx.SYSTEM_BATTERY_POWER] is not None:
+                    snapshot["battery_power"] = values[gx.SYSTEM_BATTERY_POWER]
+                soc = values[gx.SYSTEM_BATTERY_SOC]
+                if soc is None:
+                    pass
+                elif not 0 <= soc <= 100:
                     _LOGGER.warning(
                         "Victron driver: dropping battery_soc=%s — outside "
                         "0-100%%. Confirm the system unit id (default 100) "
@@ -367,17 +334,15 @@ class VictronEssDriver(BatteryDriver):
                     self._last_valid_soc_monotonic = asyncio.get_running_loop().time()
 
         if requested is None or "ac_out_load" in requested:
-            # AC-out power(23) through the Multi's DC voltage(26), which
-            # vouches for it (see the GX-validity gate).
-            regs = await self._client.async_read_holding_block(
-                self._vebus_unit_id, _REG_VEBUS_AC_OUT_L1_POWER,
-                _REG_VEBUS_DC_VOLTAGE - _REG_VEBUS_AC_OUT_L1_POWER + 1,
-            )
-            if regs is not None and self._check_service(
-                _VEBUS_SERVICE,
-                decode_u16(regs, _REG_VEBUS_DC_VOLTAGE - _REG_VEBUS_AC_OUT_L1_POWER),
+            # With the Multi's own DC voltage, which vouches for the figure
+            # (see the GX-validity gate).
+            values = await self._gx.read(gx.VEBUS, [gx.VEBUS_AC_OUT_L1_POWER, gx.VEBUS_DC_VOLTAGE])
+            if (
+                values is not None
+                and self._check_service(_VEBUS_SERVICE, values[gx.VEBUS_DC_VOLTAGE])
+                and values[gx.VEBUS_AC_OUT_L1_POWER] is not None
             ):
-                load = decode_i16(regs, 0) * _AC_OUT_POWER_W_PER_COUNT
+                load = int(values[gx.VEBUS_AC_OUT_L1_POWER])
                 self._ac_out_load_w = load
                 self._ac_out_load_monotonic = asyncio.get_running_loop().time()
                 snapshot["ac_out_load"] = load
@@ -387,58 +352,45 @@ class VictronEssDriver(BatteryDriver):
             # has gone stale does.
 
         if requested is None or {"ac_power_setpoint", "disable_charge", "disable_feedin"} & requested:
-            regs = await self._client.async_read_holding_block(
-                self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, 3
-            )
-            # No voltage of its own in this block: trusted only while the
-            # vebus service last vouched for its data. A placeholder here
+            values = await self._gx.read(gx.VEBUS, [
+                gx.VEBUS_AC_POWER_SETPOINT_L1, gx.VEBUS_DISABLE_CHARGE, gx.VEBUS_DISABLE_FEEDIN,
+            ])
+            # Unknown while the vebus service is not trusted: a placeholder
             # would show a 0 W setpoint and cleared flags that were never
             # written.
-            if regs is not None and self._service_valid[_VEBUS_SERVICE]:
-                snapshot["ac_power_setpoint"] = decode_i16(regs, 0)
+            if values is not None and None not in values.values():
+                snapshot["ac_power_setpoint"] = int(values[gx.VEBUS_AC_POWER_SETPOINT_L1])
                 # Remembered so a readback that disagrees with what is wanted
                 # gets corrected on the next poll.
                 self._disable_flags = (
-                    int(bool(decode_u16(regs, 1))), int(bool(decode_u16(regs, 2)))
+                    int(bool(values[gx.VEBUS_DISABLE_CHARGE])),
+                    int(bool(values[gx.VEBUS_DISABLE_FEEDIN])),
                 )
                 snapshot.update({k: int(v) for k, v in self._user_disable.items()})
 
         if requested is None or "ess_control_mode" in requested:
-            regs = await self._client.async_read_holding_block(
-                self._system_unit_id, _REG_SETTINGS_HUB4_MODE, 1
-            )
-            if regs is not None:
-                mode = decode_u16(regs, 0)
+            values = await self._gx.read(gx.SETTINGS, [gx.SETTINGS_HUB4_MODE])
+            mode = values[gx.SETTINGS_HUB4_MODE] if values is not None else None
+            if mode is not None:
+                mode = int(mode)
                 self._ess_mode_confirmed_external = mode == _HUB4_MODE_EXTERNAL_CONTROL
                 self._ess_mode_monotonic = asyncio.get_running_loop().time()
                 snapshot["ess_control_mode"] = _HUB4_MODE_LABELS.get(
                     mode, f"Unknown ESS mode ({mode})"
                 )
-            # Same failed-read rule as ac_out_load above.
+            # Same failed-read rule as ac_out_load above. An unknown mode is
+            # not a confirmation either way: it expires like a failed read.
 
         return snapshot
 
-    def _check_service(self, service: str, dc_voltage_raw: int) -> bool:
-        """Update one service's validity from the DC voltage it just served;
-        return whether the rest of that read may be used.
+    def _check_service(self, service: str, witness_value) -> bool:
+        """Update one service's trust from its witness (the DC voltage it
+        just reported); return whether the rest of that read may be used.
 
-        Transitions are logged once; every value read under a closed gate is
-        dropped like a failed read, so the coordinator keeps the last valid
-        ones instead of zeros.
+        The transport reports an untrusted service's values as None and logs
+        the transitions; this only keeps the state the write gate reads.
         """
-        valid = dc_voltage_raw != 0
-        if valid != self._service_valid[service]:
-            if valid:
-                _LOGGER.info(
-                    "Victron driver: GX %s service reports valid data again", service
-                )
-            else:
-                _LOGGER.warning(
-                    "Victron driver: GX %s service reports 0 V DC — it has no "
-                    "valid data (services restarting?); its readings are "
-                    "dropped and no setpoint is written until it recovers",
-                    service,
-                )
+        valid = witness_value is not None
         self._service_valid[service] = valid
         return valid
 
@@ -471,7 +423,7 @@ class VictronEssDriver(BatteryDriver):
     # --- control (write) ----------------------------------------------------
 
     def _echo(self, battery_setpoint_w: int, ac_power_setpoint: int) -> dict:
-        # ac_power_setpoint is the raw register (what the Multi was told);
+        # ac_power_setpoint is the raw setpoint (what the Multi was told);
         # battery_setpoint_w is the battery intent net_power_from_data reads.
         return {"ac_power_setpoint": ac_power_setpoint, "battery_setpoint_w": battery_setpoint_w}
 
@@ -482,10 +434,10 @@ class VictronEssDriver(BatteryDriver):
         )
 
     def _refusal(self) -> Optional[str]:
-        """Why register 37 must not be written right now, or None if it may.
+        """Why the setpoint must not be written right now, or None if it may.
 
         Fail-closed on both inputs: only a positively-confirmed *and fresh*
-        value passes. A cached "yes" that stopped being renewed (its register
+        value passes. A cached "yes" that stopped being renewed (its value
         went quiet after once answering) refuses exactly like one never read.
         """
         now = asyncio.get_running_loop().time()
@@ -503,20 +455,16 @@ class VictronEssDriver(BatteryDriver):
             self._ac_out_load_w is None
             or now - self._ac_out_load_monotonic > _AC_OUT_STALE_S
         ):
-            # No safe way to translate battery power into the AC-in register
+            # No safe way to translate battery power into the AC-in setpoint
             # without a fresh AC-out reading. Refuse rather than guess.
             return "consumption_unavailable"
         return None
 
     def _ac_in_target(self, battery_w: int) -> int:
-        # Round-tripped through the register's own int16 clamp, so a readback
-        # is compared against what the hardware can actually echo.
-        return decode_i16([encode_i16(battery_w + self._ac_out_load_w)])
+        return int(battery_w + self._ac_out_load_w)
 
     async def _write_ac_in(self, ac_in_w: int) -> bool:
-        ok = await self._client.async_write_registers(
-            self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, [encode_i16(ac_in_w)]
-        )
+        ok = await self._gx.write(gx.VEBUS, {gx.VEBUS_AC_POWER_SETPOINT_L1: ac_in_w})
         _LOGGER.debug(
             "Victron driver: AcPowerSetpoint=%sW (battery target %sW + AC-out %sW)%s",
             ac_in_w, self._target_w, self._ac_out_load_w, "" if ok else " — write failed",
@@ -555,9 +503,9 @@ class VictronEssDriver(BatteryDriver):
         )
         if self._disable_flags == wanted:
             return True
-        ok = await self._client.async_write_registers(
-            self._vebus_unit_id, _REG_VEBUS_DISABLE_CHARGE, list(wanted)
-        )
+        ok = await self._gx.write(gx.VEBUS, {
+            gx.VEBUS_DISABLE_CHARGE: wanted[0], gx.VEBUS_DISABLE_FEEDIN: wanted[1],
+        })
         _LOGGER.debug(
             "Victron driver: DisableCharge=%s DisableFeedIn=%s (idle lock %s, was %s)%s",
             wanted[0], wanted[1], "on" if idle else "off", self._disable_flags,
@@ -627,33 +575,28 @@ class VictronEssDriver(BatteryDriver):
                 applied=self._echo(applied, ac_in_target),
             )
 
-        regs = await self._client.async_read_holding_block(
-            self._vebus_unit_id, _REG_VEBUS_AC_POWER_SETPOINT_L1, 1
-        )
+        echo = await self._gx.read(gx.VEBUS, [gx.VEBUS_AC_POWER_SETPOINT_L1])
+        echoed = echo[gx.VEBUS_AC_POWER_SETPOINT_L1] if echo is not None else None
         # The echo only confirms the write landed, not that the Multi
         # achieved it, so also read actual battery power for the shared
-        # non-responsive-delivery tracker to judge delivery against.
-        # Voltage(840) through Power(842), through the same gate as the
-        # telemetry poll, so the GX's invalid-value 0 is not judged as a
+        # non-responsive-delivery tracker to judge delivery against — with
+        # the system witness, so the GX's invalid value is not judged as a
         # battery that delivered nothing.
-        power_regs = await self._client.async_read_holding_block(
-            self._system_unit_id, _REG_SYSTEM_BATTERY_VOLTAGE,
-            _REG_SYSTEM_BATTERY_POWER - _REG_SYSTEM_BATTERY_VOLTAGE + 1,
-        )
+        power = await self._gx.read(gx.SYSTEM, [gx.SYSTEM_BATTERY_VOLTAGE, gx.SYSTEM_BATTERY_POWER])
         battery_power_w = (
-            decode_i16(power_regs, _REG_SYSTEM_BATTERY_POWER - _REG_SYSTEM_BATTERY_VOLTAGE)
-            if power_regs is not None
-            and self._check_service(_SYSTEM_SERVICE, decode_u16(power_regs, 0))
+            power[gx.SYSTEM_BATTERY_POWER]
+            if power is not None
+            and self._check_service(_SYSTEM_SERVICE, power[gx.SYSTEM_BATTERY_VOLTAGE])
             else None
         )
 
-        if regs is None:
+        if echoed is None:
             return SetpointResult(
                 ok=True, net_power_w=applied, confirmed=False,
                 battery_power_w=battery_power_w,
                 applied=self._echo(applied, ac_in_target),
             )
-        echoed = decode_i16(regs, 0)
+        echoed = int(echoed)
         return SetpointResult(
             ok=True,
             net_power_w=applied,
@@ -767,16 +710,16 @@ class VictronEssDriver(BatteryDriver):
         register *map* is correct for this Venus OS version, which is a
         hardware-validation step this probe cannot perform.
         """
-        client = VictronModbusClient(host, port)
+        transport = ModbusGxTransport(
+            host, port, vebus_unit_id=vebus_unit_id, system_unit_id=system_unit_id,
+        )
         try:
-            if not await client.async_connect():
+            if not await transport.connect():
                 return False
-            vebus_regs = await client.async_read_holding_block(
-                int(vebus_unit_id), _REG_VEBUS_AC_POWER_SETPOINT_L1, 1
-            )
-            system_regs = await client.async_read_holding_block(
-                int(system_unit_id), _REG_SYSTEM_BATTERY_SOC, 1
-            )
-            return vebus_regs is not None and system_regs is not None
+            # Answering is what counts here, not whether the values are valid
+            # yet: a GX still starting its services answers with unknowns.
+            vebus = await transport.read(gx.VEBUS, [gx.VEBUS_AC_POWER_SETPOINT_L1])
+            system = await transport.read(gx.SYSTEM, [gx.SYSTEM_BATTERY_SOC])
+            return vebus is not None and system is not None
         finally:
-            await client.async_close()
+            await transport.close()

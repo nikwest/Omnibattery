@@ -22,22 +22,26 @@ from custom_components.omnibattery.drivers.victron import (
     _HARDWARE_WATCHDOG_S,
     _HUB4_MODE_EXTERNAL_CONTROL,
     _IDLE_LOCK_DELAY_S,
-    _REG_SETTINGS_HUB4_MODE,
-    _REG_VEBUS_AC_OUT_L1_POWER,
     _SETPOINT_REFRESH_INTERVAL_S,
-    _REG_SYSTEM_BATTERY_POWER,
-    _REG_SYSTEM_BATTERY_SOC,
-    _REG_SYSTEM_BATTERY_VOLTAGE,
-    _REG_SYSTEM_SERIAL,
-    _REG_VEBUS_AC_POWER_SETPOINT_L1,
-    _REG_VEBUS_DISABLE_CHARGE,
 )
 from custom_components.omnibattery.infra.victron_modbus_client import (
-    decode_ascii,
     decode_i16,
     decode_u16,
     encode_i16,
 )
+
+# The GX's Modbus-TCP register map, as the fakes below serve it — written out
+# here on purpose, independent of the transport's own table, so a typo in
+# either one fails these tests (attributes.csv from victronenergy/
+# dbus_modbustcp).
+_REG_VEBUS_AC_OUT_L1_POWER = 23
+_REG_VEBUS_AC_POWER_SETPOINT_L1 = 37
+_REG_VEBUS_DISABLE_CHARGE = 38
+_REG_SYSTEM_SERIAL = 800
+_REG_SYSTEM_BATTERY_VOLTAGE = 840
+_REG_SYSTEM_BATTERY_POWER = 842
+_REG_SYSTEM_BATTERY_SOC = 843
+_REG_SETTINGS_HUB4_MODE = 2902
 
 
 def _fake_client():
@@ -96,6 +100,7 @@ def _driver(
     # Both GX services already vouched for (the gate starts closed on its
     # own); the GX-validity gate has its own tests.
     driver._service_valid = {"system": True, "vebus": True}
+    driver._gx._trusted = {"system": True, "vebus": True}
     # Idle lock already known-clear, so tests about the setpoint see only the
     # setpoint write; the lock has its own tests.
     driver._disable_flags = (0, 0)
@@ -178,7 +183,7 @@ async def test_read_telemetry_decodes_voltage_soc_and_power():
     driver = _driver(client=client)
 
     data = await driver.read_telemetry(["battery_soc", "battery_power", "battery_voltage"])
-    assert data["battery_voltage"] == 530  # scaled 0.1 -> 53.0V at the sensor layer
+    assert data["battery_voltage"] == 53.0  # register 530, 0.1 V per count
     assert data["battery_power"] == -320
     assert data["battery_soc"] == 65
 
@@ -259,7 +264,7 @@ async def test_read_telemetry_rejects_a_zero_soc_too_soon_after_a_real_reading()
     for _ in range(2):
         data = await driver.read_telemetry(_BATTERY_KEYS)
         assert "battery_soc" not in data
-        assert data["battery_voltage"] == 530  # the rest of the block is real
+        assert data["battery_voltage"] == 53.0  # the rest of the block is real
     # Recovery: the next real reading goes straight through.
     assert (await driver.read_telemetry(_BATTERY_KEYS))["battery_soc"] == 67
 
@@ -692,7 +697,7 @@ async def test_apply_setpoint_does_not_report_the_gx_placeholder_as_zero_deliver
 @pytest.mark.asyncio
 async def test_apply_setpoint_clamps_to_envelope():
     driver = _driver(max_charge_power_w=2000, max_discharge_power_w=1500, consumption=0)
-    driver._client.async_read_holding_block = _every_read_answers(encode_i16(2000))
+    driver._gx._client.async_read_holding_block = _every_read_answers(encode_i16(2000))
 
     over_charge = await driver.apply_setpoint(9000)
     assert over_charge.net_power_w == 2000
@@ -1067,7 +1072,8 @@ async def test_connect_tolerates_an_unreadable_serial():
 
 @pytest.mark.asyncio
 async def test_probe_requires_both_unit_ids_to_answer(monkeypatch):
-    from custom_components.omnibattery.drivers import victron as victron_mod
+    # The transport opens the probe's own connection.
+    from custom_components.omnibattery.drivers import victron_transport as victron_mod
 
     fake = _fake_client()
     fake.async_read_holding_block = AsyncMock(return_value=[1])
