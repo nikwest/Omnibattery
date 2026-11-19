@@ -654,6 +654,24 @@
           "slave_id": "Modbus slave/unit id (default 1)"
         }
       },
+      "reconfigure_battery_victron": {
+        "title": "Reconfigure battery {battery_num} — Connection (Victron)",
+        "description": "Update the GX device's address and the unit ids for Victron battery {battery_num}. All other settings are preserved, including the power limits — change those in the integration's options.",
+        "data": {
+          "name": "Name",
+          "host": "IP Address",
+          "port": "Modbus Port",
+          "victron_vebus_unit_id": "Multiplus/Quattro (vebus) unit id",
+          "victron_system_unit_id": "System unit id"
+        },
+        "data_description": {
+          "name": "Descriptive name to identify this battery",
+          "host": "Address of the GX device, not the Multiplus/Quattro itself",
+          "port": "Modbus TCP port (default 502)",
+          "victron_vebus_unit_id": "Unit id of the vebus (Multiplus/Quattro) service",
+          "victron_system_unit_id": "Unit id of the system aggregate service — 100 is Victron's documented default; only change it if your GX device answers elsewhere"
+        }
+      },
           "reconfigure_battery_huawei_slave": {
             "title": "Batterij {battery_num} opnieuw configureren — Welke omvormer?",
             "description": "{count} omvormers met batterij hebben op deze bus geantwoord. Kies degene waar deze batterij bij hoort.",

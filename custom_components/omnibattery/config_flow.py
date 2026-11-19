@@ -774,8 +774,14 @@ def _hoymiles_capacity_default(battery_data: dict) -> float:
     return 2.24
 
 
-def _victron_connection_schema(battery_num: int, saved: dict | None = None) -> vol.Schema:
-    """Shared form for the setup and options flows; ``saved`` pre-fills an edit."""
+def _victron_connection_schema(
+    battery_num: int, saved: dict | None = None, *, include_power: bool = True
+) -> vol.Schema:
+    """Shared form for the setup, options and reconfigure flows.
+
+    ``saved`` pre-fills an edit. Reconfigure passes ``include_power=False``: it
+    only moves the connection, and the power ceilings stay in the options flow.
+    """
     saved = saved or {}
     unit_id = vol.All(
         NumberSelector(NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)),
@@ -793,19 +799,19 @@ def _victron_connection_schema(battery_num: int, saved: dict | None = None) -> v
         vol.Required(CONF_HOST, default=saved[CONF_HOST])
         if saved.get(CONF_HOST) else vol.Required(CONF_HOST)
     )
-    return vol.Schema(
-        {
-            vol.Required(CONF_NAME, default=saved.get(CONF_NAME, f"Victron ESS {battery_num}")): str,
-            host_key: str,
-            vol.Optional(CONF_PORT, default=saved.get(CONF_PORT, 502)): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=65535)
-            ),
-            vebus_key: unit_id,
-            vol.Required("victron_system_unit_id", default=saved.get("victron_system_unit_id", 100)): unit_id,
-            vol.Required("max_charge_power", default=saved.get("max_charge_power", 5000)): power,
-            vol.Required("max_discharge_power", default=saved.get("max_discharge_power", 5000)): power,
-        }
-    )
+    fields = {
+        vol.Required(CONF_NAME, default=saved.get(CONF_NAME, f"Victron ESS {battery_num}")): str,
+        host_key: str,
+        vol.Optional(CONF_PORT, default=saved.get(CONF_PORT, 502)): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=65535)
+        ),
+        vebus_key: unit_id,
+        vol.Required("victron_system_unit_id", default=saved.get("victron_system_unit_id", 100)): unit_id,
+    }
+    if include_power:
+        fields[vol.Required("max_charge_power", default=saved.get("max_charge_power", 5000))] = power
+        fields[vol.Required("max_discharge_power", default=saved.get("max_discharge_power", 5000))] = power
+    return vol.Schema(fields)
 
 
 def _victron_power_ceilings(battery_data: dict) -> tuple[int, int]:
@@ -3241,6 +3247,8 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             return await self.async_step_reconfigure_battery_hoymiles(user_input)
         if current.get("brand", "marstek") == "huawei":
             return await self.async_step_reconfigure_battery_huawei(user_input)
+        if current.get("brand", "marstek") == "victron":
+            return await self.async_step_reconfigure_battery_victron(user_input)
 
         errors = {}
 
@@ -3671,6 +3679,69 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
                         vol.All(NumberSelector(NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)), vol.Coerce(int)),
                 }
             ),
+            errors=errors,
+            description_placeholders={"battery_num": str(battery_num)},
+        )
+
+    async def async_step_reconfigure_battery_victron(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Update the GX device's address and unit ids during reconfiguration.
+
+        Connection only, like the other brands' reconfigure steps: the power
+        ceilings and every other setting stay as stored (they are edited in the
+        options flow). Without this step a Victron battery fell through to the
+        Marstek form, whose Marstek probe can never pass against a GX device.
+        """
+        entry = self._get_reconfigure_entry()
+        current_batteries = entry.data.get("batteries", [])
+        battery_num = self.battery_index + 1
+        current = (
+            current_batteries[self.battery_index]
+            if self.battery_index < len(current_batteries)
+            else {}
+        )
+        errors = {}
+
+        if user_input is not None:
+            new_host = user_input[CONF_HOST]
+            new_port = int(user_input.get(CONF_PORT, 502))
+            vebus_unit_id = int(user_input["victron_vebus_unit_id"])
+            system_unit_id = int(user_input.get("victron_system_unit_id", 100))
+            # A GX device serves several Modbus-TCP clients at once, so this
+            # probe does not have to release the coordinator's connection.
+            if not await VictronEssDriver.probe(new_host, new_port, vebus_unit_id, system_unit_id):
+                errors["base"] = "cannot_connect"
+            else:
+                old_host = current.get(CONF_HOST)
+                old_port = current.get(CONF_PORT)
+                # The unit ids are not part of the device identity; only a
+                # moved GX device (host/port) moves the registry ids.
+                if old_host and old_port and (old_host != new_host or old_port != new_port):
+                    self._migrate_battery_registry_ids(
+                        entry, old_host, old_port, new_host, new_port
+                    )
+
+                updated = dict(current)
+                updated[CONF_NAME] = user_input[CONF_NAME]
+                updated[CONF_HOST] = new_host
+                updated[CONF_PORT] = new_port
+                updated["victron_vebus_unit_id"] = vebus_unit_id
+                updated["victron_system_unit_id"] = system_unit_id
+                updated["brand"] = "victron"
+                self._reconfigure_batteries.append(updated)
+                self.battery_index += 1
+
+                if self.battery_index >= len(current_batteries):
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        data_updates={"batteries": self._reconfigure_batteries},
+                    )
+                return await self.async_step_reconfigure_battery()
+
+        return self.async_show_form(
+            step_id="reconfigure_battery_victron",
+            data_schema=_victron_connection_schema(battery_num, current, include_power=False),
             errors=errors,
             description_placeholders={"battery_num": str(battery_num)},
         )
