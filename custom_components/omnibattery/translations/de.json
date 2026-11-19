@@ -811,6 +811,9 @@
     "error": {
       "invalid_mac": "Das sieht nicht wie eine MAC-Adresse aus. Erwartet werden sechs Paare hexadezimaler Ziffern, zum Beispiel dc:04:5a:14:6b:33.",
       "cannot_connect": "Verbindung zur Batterie nicht möglich. Überprüfen Sie die IP-Adresse und dass die Batterie im Netzwerk erreichbar ist.",
+      "victron_system_unit_id": "Das GX-Gerät antwortet, aber nicht unter der System-Unit-ID: Dort lässt sich kein Ladezustand lesen. Lassen Sie sie auf 100, es sei denn, die Modbus/TCP-Dienstliste Ihres GX-Geräts nennt für den Systemdienst (com.victronenergy.system) eine andere Unit-ID.",
+      "victron_vebus_unit_id": "Das GX-Gerät antwortet, aber der Multiplus/Quattro nicht unter der vebus-Unit-ID. Prüfen Sie die Unit-ID des vebus-Dienstes unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste auf dem GX-Gerät.",
+      "victron_no_ess": "Der Multiplus/Quattro antwortet, hat aber keine ESS-Steuerregister: Der ESS-Assistent ist darauf nicht installiert. Installieren Sie ihn mit VictronConnect oder VEConfigure und stellen Sie dann auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
       "hoymiles_no_power_ctrl": "Diese MQTT-Geräte-ID sendet Telemetrie, aber keine Leistungssteuerung. In einem gekoppelten Hoymiles-System ist nur der Master steuerbar: Füge die Geräte-ID des Masters einmal hinzu, nicht die des Slaves.",
       "indevolt_http_digest": "Die Batterie verlangt ein Passwort: Die lokale API steht auf HTTP Digest. Wähle in der Indevolt-App HTTP und versuche es erneut.",
       "no_battery": "Wechselrichter erreichbar, meldet aber keine Batterie. Prüfe, ob die LUNA2000 angeschlossen ist und die Modbus-Slave-ID auf den Wechselrichter zeigt.",
@@ -1478,6 +1481,9 @@
     "error": {
       "invalid_mac": "Das sieht nicht wie eine MAC-Adresse aus. Erwartet werden sechs Paare hexadezimaler Ziffern, zum Beispiel dc:04:5a:14:6b:33.",
       "cannot_connect": "Verbindung zur Batterie nicht möglich. Überprüfen Sie die IP-Adresse und dass die Batterie im Netzwerk erreichbar ist.",
+      "victron_system_unit_id": "Das GX-Gerät antwortet, aber nicht unter der System-Unit-ID: Dort lässt sich kein Ladezustand lesen. Lassen Sie sie auf 100, es sei denn, die Modbus/TCP-Dienstliste Ihres GX-Geräts nennt für den Systemdienst (com.victronenergy.system) eine andere Unit-ID.",
+      "victron_vebus_unit_id": "Das GX-Gerät antwortet, aber der Multiplus/Quattro nicht unter der vebus-Unit-ID. Prüfen Sie die Unit-ID des vebus-Dienstes unter Einstellungen → Dienste → Modbus/TCP → Verfügbare Dienste auf dem GX-Gerät.",
+      "victron_no_ess": "Der Multiplus/Quattro antwortet, hat aber keine ESS-Steuerregister: Der ESS-Assistent ist darauf nicht installiert. Installieren Sie ihn mit VictronConnect oder VEConfigure und stellen Sie dann auf dem GX-Gerät Einstellungen → ESS → Modus auf \"External control\".",
       "hoymiles_no_power_ctrl": "Diese MQTT-Geräte-ID sendet Telemetrie, aber keine Leistungssteuerung. In einem gekoppelten Hoymiles-System ist nur der Master steuerbar: Füge die Geräte-ID des Masters einmal hinzu, nicht die des Slaves.",
       "indevolt_http_digest": "Die Batterie verlangt ein Passwort: Die lokale API steht auf HTTP Digest. Wähle in der Indevolt-App HTTP und versuche es erneut.",
       "no_battery": "Wechselrichter erreichbar, meldet aber keine Batterie. Prüfe, ob die LUNA2000 angeschlossen ist und die Modbus-Slave-ID auf den Wechselrichter zeigt.",

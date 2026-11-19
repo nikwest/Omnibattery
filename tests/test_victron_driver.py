@@ -1009,6 +1009,81 @@ async def test_user_switch_state_is_what_the_user_asked_for_even_while_idle():
 
 
 @pytest.mark.asyncio
+async def test_a_switch_toggle_shows_on_the_next_fast_poll():
+    """The switches show the user's choice, which the driver holds itself, so
+    any successful read reports it — not only the 30 s readback of 38/39."""
+    driver = _driver(client=_gx_client(battery_block=[530, 0, 0, 67], ac_out_block=_ac_out_block(0)))
+
+    await driver.write_control("disable_charge", 1)
+    data = await driver.read_telemetry(["battery_soc", "battery_power", "battery_voltage", "ac_out_load"])
+
+    assert data["disable_charge"] == 1
+    assert data["disable_feedin"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_still_reports_nothing_with_the_switches():
+    """An empty snapshot is how a failed read reaches the coordinator; the
+    switch state must not turn it into a "successful" one."""
+    driver = _driver(client=_gx_client())
+
+    assert await driver.read_telemetry(["battery_soc", "ac_out_load"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_ess_mode_keeps_its_last_value_while_the_gx_restarts():
+    """Hub4Mode reads 0 — no mode at all — while the GX restarts. It follows
+    the system service's witness, so the sensor keeps the last real mode
+    instead of showing "Unknown ESS mode (0)"."""
+    image = {840: 530, 843: 67, 2902: _HUB4_MODE_EXTERNAL_CONTROL}
+    client = _fake_client()
+    client.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            [image.get(start + i, 0) for i in range(count)] if unit_id == 100 else None
+        )
+    )
+    driver = _driver(client=client, ess_mode_external=None)
+    assert (await driver.read_telemetry(["ess_control_mode"]))["ess_control_mode"] == "External control"
+
+    image.update({840: 0, 843: 0, 2902: 0})
+    await driver.read_telemetry(["battery_soc"])
+    data = await driver.read_telemetry(["ess_control_mode"])
+
+    assert "ess_control_mode" not in data
+    assert driver._ess_mode_confirmed_external is True     # not refreshed: it expires
+
+
+@pytest.mark.parametrize(
+    "answers, expected",
+    [
+        ({"connect": False}, "cannot_connect"),
+        ({(100, 843): False}, "victron_system_unit_id"),
+        ({(227, 23): False}, "victron_vebus_unit_id"),
+        ({(227, 37): False}, "victron_no_ess"),
+        ({}, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_diagnose_names_what_did_not_answer(monkeypatch, answers, expected):
+    """Wrong system unit id, wrong vebus unit id, and a Multi without the
+    ESS assistant (no /Hub4 registers) each get their own message."""
+    from custom_components.omnibattery.drivers import victron_transport
+
+    fake = _fake_client()
+    fake.async_connect = AsyncMock(return_value=answers.get("connect", True))
+    fake.async_read_holding_block = AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            None if answers.get((unit_id, start), True) is False else [1] * count
+        )
+    )
+    monkeypatch.setattr(victron_transport, "VictronModbusClient", lambda *a, **k: fake)
+
+    assert await VictronEssDriver.diagnose("1.2.3.4", 502, 227, 100) == expected
+    assert await VictronEssDriver.probe("1.2.3.4", 502, 227, 100) is (expected is None)
+    fake.async_close.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unsupported_hardware_controls_report_false():
     driver = _driver()
     assert await driver.set_charge_cutoff(50) is False
@@ -1019,7 +1094,9 @@ async def test_unsupported_hardware_controls_report_false():
 async def test_apply_config_updates_software_power_ceiling():
     driver = _driver(max_charge_power_w=3000, max_discharge_power_w=3000)
 
-    await driver.apply_config(max_charge_power_w=4500, max_discharge_power_w=1000)
+    # True: the coordinator reads anything else as a failed config write and
+    # warned on every start.
+    assert await driver.apply_config(max_charge_power_w=4500, max_discharge_power_w=1000) is True
 
     assert driver.capabilities.max_charge_power_w == 4500
     assert driver.capabilities.max_discharge_power_w == 1000
@@ -1143,3 +1220,37 @@ def test_device_info_reports_victron_as_the_manufacturer():
     assert info["manufacturer"] == "Victron"
     assert info["model"] == "Victron ESS (Multiplus/Quattro)"
     assert info["serial_number"] == "HQ1234ABCDE"
+
+
+# ----------------------------------------------------------------------
+# coordinator wiring
+# ----------------------------------------------------------------------
+
+def test_coordinator_builds_the_victron_driver(monkeypatch):
+    from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+    from custom_components.omnibattery.infra.coordinator import (
+        MarstekVenusDataUpdateCoordinator,
+    )
+
+    monkeypatch.setattr(DataUpdateCoordinator, "__init__", lambda *_args, **_kwargs: None)
+    coordinator = MarstekVenusDataUpdateCoordinator(
+        Mock(), "Victron ESS", "10.0.1.31", 502, "sensor.grid_power",
+        brand="victron", max_charge_power=3000, max_discharge_power=2500, min_soc=20,
+        victron_vebus_unit_id=227, victron_system_unit_id=0,
+        full_charge_voltage_taper_enabled=True,
+    )
+
+    driver = coordinator.driver
+    assert isinstance(driver, VictronEssDriver)
+    assert driver._gx._unit_ids == {"system": 0, "settings": 0, "vebus": 227}
+    assert driver.capabilities.max_charge_power_w == 3000
+    assert driver.capabilities.max_discharge_power_w == 2500
+    assert driver.capabilities.hardware_soc_cutoff is False
+    # Marstek-only cell maintenance, forced off whatever the stored flag says.
+    assert coordinator.full_charge_voltage_taper_enabled is False
+    info = coordinator.battery_device_info
+    assert info["manufacturer"] == "Victron"
+    assert info["model"] == "Victron ESS (Multiplus/Quattro)"
+    # The GX device's web interface (Remote Console, settings).
+    assert info["configuration_url"] == "http://10.0.1.31/"

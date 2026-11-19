@@ -33,7 +33,9 @@ Omnibattery reads battery SOC and power from the system aggregate, the power the
 3. At **Configure battery _n_ — Connection (Victron)**, enter **Name**, the GX device's **IP Address** and **Modbus Port**, the **vebus unit id**, leave **System unit id** at 100 unless you know otherwise, and set your **Max Charge Power** / **Max Discharge Power**.
 4. Finish the shared power and SOC limits, including nominal battery capacity — this route does not report it natively.
 
-The wizard confirms both unit ids answer over Modbus; it cannot confirm the register map itself is correct for your Venus OS version.
+The wizard checks that the GX device answers, that the system unit id serves the battery state of charge, that the vebus unit id is the Multi's, and that the Multi has the ESS control registers (they only exist once the ESS assistant is installed). If one of them does not answer, it tells you which. It cannot confirm the register map itself is correct for your Venus OS version.
+
+To change the GX device's address or the unit ids later, use **Reconfigure** on the integration; the power limits and every other setting stay as they are.
 
 ## What you will see
 
@@ -47,7 +49,8 @@ Cell-balance monitoring, voltage taper, and MPPT solar telemetry are not availab
 
 ## If it does not work
 
-- Confirm Modbus/TCP is enabled on the GX device and reachable from Home Assistant.
+- Confirm Modbus/TCP is enabled on the GX device and reachable from Home Assistant. The device page links to the GX device's own web interface (Remote Console).
+- If setup says the Multiplus/Quattro has no ESS control registers, install the ESS assistant on it (VictronConnect or VEConfigure) before setting ESS Mode.
 - Re-check the vebus unit id under **Settings → Services → Modbus/TCP → Available services** — it can differ from what another tool or guide assumed. If your GX device's system aggregate does not answer on unit id 100, re-check that value too.
 - Confirm **Settings → ESS → Mode** is still **External control**; anything else means the GX device's own loop is driving the Multi, not Omnibattery. The **ESS Control Mode** sensor confirms this directly — and if it's missing entirely, nothing will be written at all, which is the safe failure mode.
 - If nothing is being commanded at all, check both **AC Output Power** and **ESS Control Mode** — either one being unavailable or unconfirmed blocks every write by design. Also look in the Home Assistant log for "reports 0 V DC": the GX device is then answering with placeholder values and no setpoint is written until it recovers.

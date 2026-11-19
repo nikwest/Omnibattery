@@ -966,6 +966,10 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
                 + (f":{self.port}" if self.port != 80 else "")
                 + "/"
             )
+        if self.brand == "victron":
+            # host/port address the GX device's Modbus-TCP server; its web
+            # interface (Remote Console, settings) is on plain HTTP.
+            info["configuration_url"] = f"http://{self.host}/"
         # The firmware line on the device page. Home Assistant keeps the last
         # value written there, so a brand whose software version is the
         # battery's firmware writes it on every start.

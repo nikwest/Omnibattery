@@ -63,6 +63,14 @@ SERVICE_WITNESS = {
     SYSTEM: SYSTEM_BATTERY_VOLTAGE,
     VEBUS: VEBUS_DC_VOLTAGE,
 }
+# Whose witness a service's values follow. Settings has no voltage of its own;
+# it shares the system unit id and restarts with it, and during a restart its
+# Hub4Mode reads 0 — not a mode — so it follows the system service.
+TRUSTED_WITH = {
+    SYSTEM: SYSTEM,
+    SETTINGS: SYSTEM,
+    VEBUS: VEBUS,
+}
 
 
 class GxTransport(Protocol):
@@ -149,9 +157,10 @@ class ModbusGxTransport:
     Each witnessed service (``SERVICE_WITNESS``) is therefore trusted only
     while its DC voltage reads above 0 V: a read that includes the witness
     sets the service's state, and a read that does not (37-39 have no voltage
-    of their own) uses the state the last one left. While a service is not
-    trusted every value from it is reported as None. Both witnessed services
-    start untrusted on each (re)connect; a failed read changes nothing.
+    of their own) uses the state the last one left. Settings follow the
+    system service (``TRUSTED_WITH``). While a service is not trusted every
+    value from it is reported as None. Both witnessed services start untrusted
+    on each (re)connect; a failed read changes nothing.
     """
 
     def __init__(
@@ -219,11 +228,9 @@ class ModbusGxTransport:
                 values[path] = _number(decode_u16(regs, offset), reg.scale)
 
         witness = SERVICE_WITNESS.get(service)
-        if witness is None:
-            return values
-        if witness in values:
+        if witness is not None and witness in values:
             self._set_trusted(service, values[witness] != 0)
-        if not self._trusted[service]:
+        if not self._trusted[TRUSTED_WITH[service]]:
             # Text needs no witness: its placeholder is all NULs, which
             # already decodes to None. That keeps the serial readable right
             # after connect, before any witness has been read.

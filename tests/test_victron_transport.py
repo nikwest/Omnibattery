@@ -91,13 +91,25 @@ async def test_modbus_ac_out_power_is_10_w_per_count_and_signed():
 
 
 @pytest.mark.asyncio
-async def test_modbus_settings_share_the_system_unit_id():
+async def test_modbus_settings_share_the_system_unit_id_and_its_trust():
+    """Hub4Mode has no voltage of its own; it lives on the system unit id and
+    restarts with it (reading 0, not a mode), so it follows that witness."""
     transport, fake = _modbus()
 
-    values = await transport.read(gx.SETTINGS, [gx.SETTINGS_HUB4_MODE])
+    assert await transport.read(gx.SETTINGS, [gx.SETTINGS_HUB4_MODE]) == {
+        gx.SETTINGS_HUB4_MODE: None   # nothing has vouched for the system yet
+    }
+    await transport.read(gx.SYSTEM, [gx.SYSTEM_BATTERY_VOLTAGE])
+    assert await transport.read(gx.SETTINGS, [gx.SETTINGS_HUB4_MODE]) == {
+        gx.SETTINGS_HUB4_MODE: 3
+    }
+    assert fake.reads[-1] == (100, 2902, 1)
 
-    assert values == {gx.SETTINGS_HUB4_MODE: 3}
-    assert fake.reads == [(100, 2902, 1)]
+    fake.image[100].update({840: 0, 2902: 0})          # the GX restarting
+    await transport.read(gx.SYSTEM, [gx.SYSTEM_BATTERY_VOLTAGE])
+    assert await transport.read(gx.SETTINGS, [gx.SETTINGS_HUB4_MODE]) == {
+        gx.SETTINGS_HUB4_MODE: None
+    }
 
 
 @pytest.mark.asyncio
@@ -146,9 +158,9 @@ async def test_modbus_services_start_untrusted_on_every_connect():
     assert (await transport.read(gx.VEBUS, [gx.VEBUS_AC_POWER_SETPOINT_L1]))[
         gx.VEBUS_AC_POWER_SETPOINT_L1
     ] is None
-    # ...but the unwitnessed settings service is not affected.
+    # ...and so is the ESS mode, which follows the system service.
     assert (await transport.read(gx.SETTINGS, [gx.SETTINGS_HUB4_MODE])) == {
-        gx.SETTINGS_HUB4_MODE: 3
+        gx.SETTINGS_HUB4_MODE: None
     }
 
 

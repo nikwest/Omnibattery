@@ -1867,9 +1867,9 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             system_unit_id = int(user_input.get("victron_system_unit_id", 100))
             max_charge_power = int(user_input["max_charge_power"])
             max_discharge_power = int(user_input["max_discharge_power"])
-            ok = await VictronEssDriver.probe(host, port, vebus_unit_id, system_unit_id)
-            if not ok:
-                errors["base"] = "cannot_connect"
+            error = await VictronEssDriver.diagnose(host, port, vebus_unit_id, system_unit_id)
+            if error is not None:
+                errors["base"] = error
             else:
                 self._current_battery_data.update({
                     CONF_NAME: user_input[CONF_NAME],
@@ -3710,8 +3710,9 @@ class MarstekVenusConfigFlow(LegacyDomainMigrationMixin, ConfigFlow, domain=DOMA
             system_unit_id = int(user_input.get("victron_system_unit_id", 100))
             # A GX device serves several Modbus-TCP clients at once, so this
             # probe does not have to release the coordinator's connection.
-            if not await VictronEssDriver.probe(new_host, new_port, vebus_unit_id, system_unit_id):
-                errors["base"] = "cannot_connect"
+            error = await VictronEssDriver.diagnose(new_host, new_port, vebus_unit_id, system_unit_id)
+            if error is not None:
+                errors["base"] = error
             else:
                 old_host = current.get(CONF_HOST)
                 old_port = current.get(CONF_PORT)
@@ -5243,9 +5244,9 @@ class OptionsFlowHandler(OptionsFlow):
                 system_unit_id = int(user_input.get("victron_system_unit_id", 100))
                 max_charge_power = int(user_input["max_charge_power"])
                 max_discharge_power = int(user_input["max_discharge_power"])
-                ok = await VictronEssDriver.probe(host, port, vebus_unit_id, system_unit_id)
-                if not ok:
-                    errors["base"] = "cannot_connect"
+                error = await VictronEssDriver.diagnose(host, port, vebus_unit_id, system_unit_id)
+                if error is not None:
+                    errors["base"] = error
                 else:
                     self._current_battery_data.update({
                         CONF_NAME: user_input[CONF_NAME],

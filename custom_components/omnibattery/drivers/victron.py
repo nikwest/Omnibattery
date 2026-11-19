@@ -366,7 +366,6 @@ class VictronEssDriver(BatteryDriver):
                     int(bool(values[gx.VEBUS_DISABLE_CHARGE])),
                     int(bool(values[gx.VEBUS_DISABLE_FEEDIN])),
                 )
-                snapshot.update({k: int(v) for k, v in self._user_disable.items()})
 
         if requested is None or "ess_control_mode" in requested:
             values = await self._gx.read(gx.SETTINGS, [gx.SETTINGS_HUB4_MODE])
@@ -381,6 +380,13 @@ class VictronEssDriver(BatteryDriver):
             # Same failed-read rule as ac_out_load above. An unknown mode is
             # not a confirmation either way: it expires like a failed read.
 
+        if snapshot:
+            # The two switches show what the user asked for, which the driver
+            # holds itself: report it with every successful read, so a toggle
+            # shows on the next (2 s) poll instead of the next 37-39 readback
+            # (30 s). Never on an empty snapshot — that is how a failed read
+            # reaches the coordinator.
+            snapshot.update({k: int(v) for k, v in self._user_disable.items()})
         return snapshot
 
     def _check_service(self, service: str, witness_value) -> bool:
@@ -623,9 +629,13 @@ class VictronEssDriver(BatteryDriver):
         min_soc_pct: Optional[float] = None,
         max_charge_power_w: Optional[int] = None,
         max_discharge_power_w: Optional[int] = None,
-    ) -> None:
+    ) -> bool:
         """Update the software power ceiling. SOC window is software-owned
-        elsewhere (see ``hardware_soc_cutoff``) and deliberately ignored here."""
+        elsewhere (see ``hardware_soc_cutoff``) and deliberately ignored here.
+
+        Nothing is written to the GX, so this cannot fail: True, which the
+        coordinator reads as "config applied" (None logged a failed write on
+        every start)."""
         updates = {}
         if max_charge_power_w is not None:
             updates["max_charge_power_w"] = max(0, int(max_charge_power_w))
@@ -633,6 +643,7 @@ class VictronEssDriver(BatteryDriver):
             updates["max_discharge_power_w"] = max(0, int(max_discharge_power_w))
         if updates:
             self._capabilities = replace(self._capabilities, **updates)
+        return True
 
     async def standby(self) -> bool:
         """Stop writing, release the idle lock, and let the hardware
@@ -701,25 +712,46 @@ class VictronEssDriver(BatteryDriver):
     # --- setup helpers -------------------------------------------------------
 
     @classmethod
-    async def probe(
+    async def diagnose(
         cls, host: str, port: int, vebus_unit_id: int, system_unit_id: int = 100
-    ) -> bool:
-        """Best-effort connectivity check for the config flow.
+    ) -> Optional[str]:
+        """Connectivity check for the config flow: None when the GX device
+        answers everything this driver needs, otherwise the config flow error
+        key naming what did not answer.
 
-        Confirms both unit ids answer a read at all — it does not confirm the
-        register *map* is correct for this Venus OS version, which is a
-        hardware-validation step this probe cannot perform.
+        * ``cannot_connect`` — no Modbus-TCP connection to the GX device.
+        * ``victron_system_unit_id`` — the system service (battery SOC) does
+          not answer on the system unit id.
+        * ``victron_vebus_unit_id`` — the Multi's AC-out power does not answer
+          on the vebus unit id: a wrong unit id, or not the Multi's service.
+        * ``victron_no_ess`` — the Multi answers but has no ESS control
+          registers: the ESS assistant is not installed on it.
+
+        Answering is what counts, not whether the values are valid yet: a GX
+        still starting its services answers with unknowns. It cannot confirm
+        the register *map* is correct for this Venus OS version, which is a
+        hardware-validation step.
         """
         transport = ModbusGxTransport(
             host, port, vebus_unit_id=vebus_unit_id, system_unit_id=system_unit_id,
         )
         try:
             if not await transport.connect():
-                return False
-            # Answering is what counts here, not whether the values are valid
-            # yet: a GX still starting its services answers with unknowns.
-            vebus = await transport.read(gx.VEBUS, [gx.VEBUS_AC_POWER_SETPOINT_L1])
-            system = await transport.read(gx.SYSTEM, [gx.SYSTEM_BATTERY_SOC])
-            return vebus is not None and system is not None
+                return "cannot_connect"
+            if await transport.read(gx.SYSTEM, [gx.SYSTEM_BATTERY_SOC]) is None:
+                return "victron_system_unit_id"
+            if await transport.read(gx.VEBUS, [gx.VEBUS_AC_OUT_L1_POWER]) is None:
+                return "victron_vebus_unit_id"
+            # /Hub4/* exists only once the ESS assistant is installed.
+            if await transport.read(gx.VEBUS, [gx.VEBUS_AC_POWER_SETPOINT_L1]) is None:
+                return "victron_no_ess"
+            return None
         finally:
             await transport.close()
+
+    @classmethod
+    async def probe(
+        cls, host: str, port: int, vebus_unit_id: int, system_unit_id: int = 100
+    ) -> bool:
+        """True when :meth:`diagnose` finds nothing missing."""
+        return await cls.diagnose(host, port, vebus_unit_id, system_unit_id) is None

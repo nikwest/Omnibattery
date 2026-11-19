@@ -811,6 +811,9 @@
     "error": {
       "invalid_mac": "Això no sembla una adreça MAC. S'esperen sis parelles de dígits hexadecimals, per exemple dc:04:5a:14:6b:33.",
       "cannot_connect": "No es pot connectar a la bateria. Verifica l'adreça IP i que la bateria sigui accessible a la xarxa.",
+      "victron_system_unit_id": "The GX device answers, but not on the system unit id: no battery state of charge can be read there. Leave it at 100 unless your GX device's Modbus/TCP service list names another unit id for the system service (com.victronenergy.system).",
+      "victron_vebus_unit_id": "The GX device answers, but the Multiplus/Quattro does not on the vebus unit id. Check the unit id listed for the vebus service under Settings → Services → Modbus/TCP → Available services on the GX device.",
+      "victron_no_ess": "The Multiplus/Quattro answers, but has no ESS control registers: the ESS assistant is not installed on it. Install it with VictronConnect or VEConfigure, then set Settings → ESS → Mode to \"External control\" on the GX device.",
       "hoymiles_no_power_ctrl": "Aquest ID de dispositiu MQTT publica telemetria però no control de potència. En un sistema Hoymiles aparellat només es controla el mestre: afegeix una sola vegada l'ID del mestre, no el de l'esclau.",
       "indevolt_http_digest": "La bateria demana una contrasenya: la seva API local està en HTTP Digest. Tria HTTP a l'app d'Indevolt i torna-ho a provar.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",
@@ -1478,6 +1481,9 @@
     "error": {
       "invalid_mac": "Això no sembla una adreça MAC. S'esperen sis parelles de dígits hexadecimals, per exemple dc:04:5a:14:6b:33.",
       "cannot_connect": "No es pot connectar a la bateria. Verifica l'adreça IP i que la bateria sigui accessible a la xarxa.",
+      "victron_system_unit_id": "The GX device answers, but not on the system unit id: no battery state of charge can be read there. Leave it at 100 unless your GX device's Modbus/TCP service list names another unit id for the system service (com.victronenergy.system).",
+      "victron_vebus_unit_id": "The GX device answers, but the Multiplus/Quattro does not on the vebus unit id. Check the unit id listed for the vebus service under Settings → Services → Modbus/TCP → Available services on the GX device.",
+      "victron_no_ess": "The Multiplus/Quattro answers, but has no ESS control registers: the ESS assistant is not installed on it. Install it with VictronConnect or VEConfigure, then set Settings → ESS → Mode to \"External control\" on the GX device.",
       "hoymiles_no_power_ctrl": "Aquest ID de dispositiu MQTT publica telemetria però no control de potència. En un sistema Hoymiles aparellat només es controla el mestre: afegeix una sola vegada l'ID del mestre, no el de l'esclau.",
       "indevolt_http_digest": "La bateria demana una contrasenya: la seva API local està en HTTP Digest. Tria HTTP a l'app d'Indevolt i torna-ho a provar.",
       "no_battery": "Inverter reached, but it reports no battery. Check that the LUNA2000 is attached and the Modbus slave ID points at the inverter.",

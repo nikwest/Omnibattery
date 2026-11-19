@@ -41,7 +41,7 @@ def test_taper_switch_created_for_marstek():
     assert any(isinstance(e, BatteryFullChargeVoltageTaperSwitch) for e in added)
 
 
-@pytest.mark.parametrize("brand", ["zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt"])
+@pytest.mark.parametrize("brand", ["zendure", "anker", "sessy", "hoymiles", "huawei", "indevolt", "victron"])
 def test_taper_switch_absent_for_other_brands(brand):
     added = _setup_switches(brand)
     assert not any(isinstance(e, BatteryFullChargeVoltageTaperSwitch) for e in added)
