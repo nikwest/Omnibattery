@@ -121,6 +121,23 @@ class VictronModbusClient:
         if client is not None:
             await _close_quietly(client)
 
+    async def _close_locked(self, client) -> None:
+        """Drop the connection a request just failed on. Caller holds ``_lock``.
+
+        A timed-out request leaves its reply in flight; pymodbus would hand it
+        to the next request on the same socket, or the socket is half-open and
+        every later request times out too. Neither recovers on its own, so the
+        socket goes. ``connected`` turns False and the driver reconnects
+        through ``connect()``, which starts every GX service untrusted again.
+
+        Unlike Marstek's single-slot TCP stack, the GX accepts many clients, so
+        closing here cannot lock the next connection out. Only the client this
+        request used is closed: one a reconnect has already swapped in stays.
+        """
+        if self._client is client:
+            self._client = None
+        await _close_quietly(client)
+
     async def async_read_holding_block(
         self, unit_id: int, start: int, count: int
     ) -> Optional[list[int]]:
@@ -133,16 +150,20 @@ class VictronModbusClient:
 
         kwargs = {self._slave_kwarg: unit_id}
         async with self._lock:
+            client = self._client
+            if client is None:
+                return None
             try:
                 try:
                     result = await asyncio.wait_for(
-                        self._client.read_holding_registers(address=start, count=count, **kwargs),
+                        client.read_holding_registers(address=start, count=count, **kwargs),
                         timeout=self._timeout,
                     )
                 finally:
                     if not self._is_shutting_down:
                         await asyncio.sleep(_MESSAGE_WAIT_S)
             except (ConnectionException, ModbusIOException, asyncio.TimeoutError):
+                await self._close_locked(client)
                 if not self._is_shutting_down:
                     _LOGGER.debug(
                         "Victron Modbus connection error reading unit %s @ %d (count=%d)",
@@ -187,16 +208,20 @@ class VictronModbusClient:
 
         kwargs = {self._slave_kwarg: unit_id}
         async with self._lock:
+            client = self._client
+            if client is None:
+                return False
             try:
                 try:
                     result = await asyncio.wait_for(
-                        self._client.write_registers(address=start, values=list(values), **kwargs),
+                        client.write_registers(address=start, values=list(values), **kwargs),
                         timeout=self._timeout,
                     )
                 finally:
                     if not self._is_shutting_down:
                         await asyncio.sleep(_MESSAGE_WAIT_S)
             except (ConnectionException, ModbusIOException, asyncio.TimeoutError) as err:
+                await self._close_locked(client)
                 if not self._is_shutting_down:
                     _LOGGER.warning(
                         "Victron Modbus write to unit %s @ %d failed: %s", unit_id, start, err
