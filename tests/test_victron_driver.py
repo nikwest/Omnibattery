@@ -1248,3 +1248,49 @@ def test_coordinator_builds_the_victron_driver(monkeypatch):
     assert info["model"] == "Victron ESS (Multiplus/Quattro)"
     # The GX device's web interface (Remote Console, settings).
     assert info["configuration_url"] == "http://10.0.1.31/"
+
+
+# ----------------------------------------------------------------------
+# Reconnect after a dropped connection
+# ----------------------------------------------------------------------
+
+
+async def test_a_dropped_connection_is_reopened_on_the_next_poll():
+    """The client drops its socket when a request fails; the next poll reopens
+    it instead of waiting for the coordinator's third failed poll, and starts
+    every service untrusted again."""
+    client = _fake_client()
+    client.connected = False
+
+    async def reconnect():
+        client.connected = True
+        return True
+
+    client.async_connect = AsyncMock(side_effect=reconnect)
+    client.async_read_holding_block = _every_read_answers(485)  # 48.5 V at x0.1
+    driver = _driver(client)
+
+    snapshot = await driver.read_telemetry(["battery_voltage"])
+
+    client.async_connect.assert_awaited_once()
+    assert snapshot["battery_voltage"] == 48.5
+
+
+async def test_a_failed_reopen_reads_nothing():
+    client = _fake_client()
+    client.connected = False
+    client.async_connect = AsyncMock(return_value=False)
+    driver = _driver(client)
+
+    assert await driver.read_telemetry() == {}
+    client.async_read_holding_block.assert_not_awaited()
+
+
+async def test_no_reopen_while_shutting_down():
+    client = _fake_client()
+    client.connected = False
+    driver = _driver(client)
+    driver.set_shutting_down(True)
+
+    await driver.read_telemetry()
+    client.async_connect.assert_not_awaited()
