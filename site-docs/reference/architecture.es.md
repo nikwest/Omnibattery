@@ -76,6 +76,8 @@ El código compartido lee `coordinator.capabilities`; no debe ramificarse según
 | Control | `hardware_soc_cutoff` | El dispositivo aplica por sí mismo los cortes de estado de carga (SOC) configurados. |
 | Control | `has_force_mode` | El dispositivo expone un modo diferenciado de carga, descarga o reposo forzado. |
 | Control | `has_rs485_control` | Se puede conmutar una compuerta externa de control RS-485 o Modbus. |
+| Control | `supports_power_setpoint` | El dispositivo acepta una orden de potencia con signo. Léelo con `can_take_setpoint()`. |
+| Control | `supports_nom_mode` | El dispositivo no acepta vatios pero puede pasar entre NOM y Manual con `apply_operating_mode()`; `operating_mode_from_data()` lee el modo en que está y `power_sample_time()` fecha su lectura de potencia. |
 | Potencia | `max_charge_power_w`, `max_discharge_power_w` | Envolvente inclusiva de potencia por dispositivo. |
 | Potencia | `min_charge_power_w`, `min_discharge_power_w` | Orden distinta de cero fiable más baja en cada sentido. |
 | Tiempo | `actuator_latency_s` | Tiempo aproximado de respuesta física usado por la protección de cambio de sentido. |
@@ -169,7 +171,7 @@ Un controlador escoge la cadencia de cada `ReadGroup`. Durante un cambio real de
 | `max_soc_charge.py` | `MaxSocChargeManager` | Aplica reducción gradual cerca de carga completa, recalibración y medición de diferencia de celdas. |
 | `weekly_full_charge.py` | `WeeklyFullChargeManager` | Programa y conserva el comportamiento periódico de carga completa y cambios temporales de corte. |
 | `temperature_limit.py` | `TemperatureChargeLimitManager` | Reduce límites de carga y descarga opcional por batería según la temperatura. |
-| `discharge_reserve.py` | `DischargeReserveManager` | Reserva energía para un periodo posterior de precio alto mediante bloqueadores de descarga. |
+| `discharge_reserve.py` | `DischargeReserveManager` | Decide si la retención del plan de Precio dinámico se aplica ahora (modo y protecciones). |
 | `high_price_discharge.py` | `HighPriceDischargeManager` | Construye y aplica anulaciones deliberadas de descarga a precio alto. |
 | `surplus_price_hold.py` | `SurplusPriceHoldManager` | Retrasa la absorción solar cuando exportar ahora tiene más valor. |
 

@@ -39,11 +39,27 @@ Los tres modos calculan si falta energía. La diferencia es quién decide cuánd
 
 Cuando se necesita carga desde red, Omnibattery se dirige solo al déficit calculado en vez de llenar cada batería hasta su estado de carga (SOC) máximo. En un sistema con varias baterías, reparte ese objetivo según la capacidad disponible de cada una. Alcanzar el objetivo de carga desde red no bloquea el excedente solar posterior: la batería puede continuar en estado solo solar.
 
-Usa **SOC mínimo garantizado** si el balance de todo el día parece suficiente pero la batería alcanza a menudo su mínimo antes de que empiece la producción solar. El interruptor y la entidad numérica establecen una reserva que debe estar disponible antes del inicio solar previsto.
+Usa **SOC mínimo garantizado** si el balance de todo el día parece suficiente pero la batería alcanza a menudo su mínimo antes de que empiece la producción solar. El interruptor la activa; su valor (**SOC mínimo** en la tarjeta, por defecto 20%) establece la reserva que debe estar disponible antes del inicio solar previsto.
 
-Usa **Reevaluar carga predictiva** tras un cambio importante de previsión o ajuste. En Precio dinámico reconstruye inmediatamente el horario restante. En Franja horaria fuerza una decisión nueva en el siguiente ciclo de control dentro de una ventana de carga activa; pulsarlo fuera de una ventana no abre ninguna. Precio en tiempo real no tiene botón porque decide de nuevo en cada ciclo de control.
+Un ajuste cambiado en la tarjeta de carga predictiva vuelve a planificar solo en el siguiente ciclo de control. Usa **Reevaluar carga predictiva** tras un cambio fuera de Omnibattery, como una previsión solar corregida o una nueva fuente de precios. En Precio dinámico reconstruye inmediatamente el horario restante. En Franja horaria fuerza una decisión nueva en el siguiente ciclo de control dentro de una ventana de carga activa; pulsarlo fuera de una ventana no abre ninguna. Precio en tiempo real no tiene botón porque decide de nuevo en cada ciclo de control.
 
 Desactiva **Carga predictiva** para pausar toda la carga predictiva desde red y sus subfunciones de Precio dinámico.
+
+### La tarjeta de carga predictiva
+
+La tarjeta de la pestaña **Control** de Omnibattery empieza con las filas base (interruptor, notificaciones, estado) y después tiene tres encabezados:
+
+- **Planificación**: el margen de seguridad solar y el SOC mínimo garantizado.
+- **Carga y descarga según el precio**: el techo de precio de carga, el margen de arbitraje, la eficiencia de ciclo completo, la carga con precios negativos, **Descarga basada en precio** con su suelo, y el estado de reserva de descarga (activo mientras el plan retiene la batería para más tarde).
+- **Venta a la red**: Venta a precio alto, Retención de excedente por precio y la predescarga inteligente.
+
+Bajo cada encabezado, cada función es un grupo, separado por una línea: su interruptor, sus ajustes y su fila de estado. El botón de reevaluar cierra la tarjeta.
+
+- Los ajustes de una función aparecen solo mientras la función está activada; el suelo de precio de descarga y su interruptor manual siguen a **Descarga basada en precio**.
+- La ayuda de cada ajuste termina con su valor por defecto, por ejemplo "Por defecto: desactivado." o "Por defecto: 0,02 €/kWh.".
+- Un umbral de precio con su interruptor manual desactivado muestra "Automático", seguido de lo que se aplica en su lugar.
+- **Avanzado** en la cabecera de la tarjeta muestra los ajustes finos; desactivado, cada función conserva su interruptor y su estado.
+- Los controles deslizantes de un precio por kWh cubren el rango habitual en céntimos enteros; escribe un valor para ir más allá.
 
 ## Si no funciona
 
@@ -51,10 +67,10 @@ Desactiva **Carga predictiva** para pausar toda la carga predictiva desde red y 
 |---|---|---|
 | No se planifica carga desde red | La energía almacenada y la solar prevista ya cubren la demanda | **Carga predictiva activa** y sus atributos de decisión |
 | Aparecen periodos baratos pero no empieza a cargar | El calendario es informativo, la cuota ya está cumplida o hay una regla de seguridad/control activa | `charging_needed`, la página del modo activo, límites de SOC de la batería y **Estado de integración** |
-| El plan informa de un déficit no cubierto | Los periodos elegibles no pueden entregar suficiente energía antes de necesitarla | Potencia de carga, capacidad de batería, techo de precio, ventanas configuradas y bloqueos físicos |
+| El plan informa de un déficit no cubierto | Los periodos elegibles no pueden entregar suficiente energía antes de necesitarla | Potencia de carga, capacidad de batería, techo de precio de carga, ventanas configuradas y bloqueos físicos |
 | La batería carga demasiado o demasiado poco | La estimación solar o de demanda de la vivienda no coincide con el día restante | Tipo de sensor de previsión, cobertura del perfil de consumo y **Margen de seguridad de previsión solar** |
 | La carga se pausa mientras aumenta la carga de la vivienda | El Máximo de importación de red o la protección de fase conserva el límite de importación | [Protección de capacidad](../../features/peak-shaving.md) y [Sensor principal de red](../main-sensor.md) |
-| Un cambio de ajuste no tiene efecto inmediato | El plan activo aún no se ha reconstruido | Pulsa **Reevaluar carga predictiva** donde esté disponible |
+| Un cambio fuera de Omnibattery aún no tiene efecto | Una previsión corregida u otra fuente de precios aún no se ha planificado | Pulsa **Reevaluar carga predictiva** donde esté disponible; los ajustes de la tarjeta se aplican solos |
 
 ??? "Detalles avanzados"
     ### Decisión energética y objetivo de carga
@@ -80,7 +96,7 @@ Desactiva **Carga predictiva** para pausar toda la carga predictiva desde red y 
 
     En una flota con varias baterías, el objetivo de red se distribuye proporcionalmente a la distancia de cada batería a su SOC máximo configurado. Precio dinámico y Franja horaria también pueden asignar una cuota a cada periodo y transferir la energía no entregada solo a periodos posteriores que aún cumplan su plazo.
 
-    **Margen de seguridad de previsión solar** se resta una vez de la solar esperada. Las instalaciones nuevas tienen por defecto aproximadamente el 5% de la capacidad total de batería configurada; si la capacidad no está disponible durante la configuración, el método alternativo es no aplicar margen.
+    **Margen de seguridad de previsión solar** se resta una vez de la solar esperada. Es una parte del sol previsto (10 % por defecto), así que un día parcial o un horizonte de dos días cede su propia parte; sin previsión solar no hay margen.
 
     ### Demanda de la vivienda durante una franja de carga
 

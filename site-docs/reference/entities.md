@@ -55,8 +55,10 @@ These entities belong to **Omnibattery System** rather than one battery.
     | `predictive_charging_active` | Predictive charging has been configured |
     | `curtailment_status`, `surplus_price_hold_status`, `discharge_reserve_status`, `high_price_discharge_status` | Relevant Dynamic Pricing feature available |
     | `capacity_protection_active` | Capacity protection configured |
+    | `temperature_charge_limit_status` (binary sensor) | Temperature charge limit configured |
     | `weekly_full_charge` | Weekly full charge enabled |
     | `charge_delay_status` | Charge delay configured |
+    | `excluded_device_status_<n>` | One per configured excluded device |
     | `system_alarm_status` | At least one battery exposes alarm registers |
 
 ??? "System numbers"
@@ -69,8 +71,8 @@ These entities belong to **Omnibattery System** rather than one battery.
     - Capacity protection: `capacity_protection_soc_threshold`
     - Charge delay: `delay_safety_margin_min`, `charge_delay_balance_deadband_kwh`, `delay_soc_setpoint`
     - Temperature: `temp_charge_limit_c`, `temp_charge_limit_band_c`, `temp_charge_limit_floor_pct`
-    - Predictive charging: `predictive_safety_margin_kwh`, `predictive_min_soc_floor`
-    - Dynamic Pricing: `max_price_threshold`, `discharge_price_threshold`, `min_arbitrage_margin`, `round_trip_efficiency`, `negative_injection_threshold`, `predischarge_reserve_soc`, `surplus_hold_min_saving`, `discharge_reserve_min_saving`
+    - Predictive charging: `predictive_safety_margin_pct`, `predictive_min_soc_floor`
+    - Dynamic Pricing: `max_price_threshold`, `discharge_price_threshold`, `min_arbitrage_margin`, `round_trip_efficiency`, `negative_injection_threshold`, `predischarge_reserve_soc`, `surplus_hold_min_saving`
     - Hourly net balance: `hourly_balance_target_net_wh`, `hourly_balance_max_offset_w`, `hourly_balance_deadband_wh`, `hourly_balance_hysteresis_w`
     - Excluded load: `excluded_device_exclusion_pct`, one per compatible configured device
 
@@ -78,7 +80,7 @@ These entities belong to **Omnibattery System** rather than one battery.
 
     - Always available controller choices: `manual_mode`, `no_pd_mode`, `three_phase_protection`, `weekly_full_charge_enabled`, `vacation_mode`, `grid_import_window_15min` (Grid Import 15-min Window, see [Peak shaving](../features/peak-shaving.md#15-minute-window))
     - Conditional features: `offgrid_mode`, `primary_feedforward`, `system_power_limits`, `predictive_charging`, `predictive_charging_notifications`, `min_soc_floor_enabled`, `charge_delay`, `delay_soc_setpoint_enabled`, `weekly_full_charge_delay`, `temp_charge_limit`, `temp_charge_limit_discharge`, `capacity_protection`, `capacity_protection_excluded_devices`, `hourly_balance`
-    - Pricing controls: `price_discharge_control`, `smart_predischarge`, `negative_price_charging`, `surplus_price_hold`, `discharge_reserve`
+    - Pricing controls: `price_discharge_control`, `smart_predischarge`, `negative_price_charging`, `surplus_price_hold`
     - Generated controls: `time_slot` for each configured time slot; `excluded_device_enabled`, `excluded_device_solar_surplus`, `excluded_device_dynamic_power_control`, and `excluded_device_cover_home` for each applicable excluded device
     - External automation compatibility: `automation_charging_active`
 
@@ -144,6 +146,7 @@ Battery entities depend on the driver. A missing entity usually means that the d
     | Switch | `full_charge_voltage_taper` | Compatible cell telemetry |
     | Switch | `backup_function`, `rs485_control_mode`, `lamp_switch` | Driver exposes the control |
     | Select | `force_mode`, `grid_off_mode`, `user_work_mode` | Driver exposes the control |
+    | Select | `autonomous_operating_mode` (`nom`, `manual`) | Battery read through Home Assistant entities with an operating mode entity. The state is what you asked for; `effective_mode`, `status`, `suspended`, `suspension_causes`, `last_change`, `last_error` and `failed_attempts` are attributes |
     | Button | `reset_device` | Driver exposes the command |
 
 ## Status and diagnostic attributes
@@ -177,7 +180,7 @@ Battery entities depend on the driver. A missing entity usually means that the d
 
     | Attribute | Meaning |
     |---|---|
-    | `trigger_1_budget_kwh` | Battery energy that **High-Price Sale** (*Surplus only* or above) may sell after preserving the forecast need before sunrise and the safety margin |
+    | `trigger_1_budget_kwh` | Battery energy that **High-Price Sale** (*Surplus only* or above) may sell after preserving the forecast need before sunrise (solar counted less the safety margin) |
     | `refill_price` | Export-price reference for solar refilling the battery tomorrow |
     | `trigger_1_reason` | Why surplus export is active or inactive |
     | `surplus_export_enabled` | Whether **High-Price Sale** is set to *Surplus only* or above |

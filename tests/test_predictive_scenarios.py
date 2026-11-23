@@ -73,8 +73,8 @@ _TOP_KEYS = {
 _OPTIONAL_TOP_KEYS = {"xfail", "weekly"}
 _SETTINGS_KEYS = {
     "max_price_threshold", "min_arbitrage_margin", "round_trip_efficiency",
-    "discharge_reserve", "peak_shaving", "contracted_power_w",
-    "guaranteed_floor_soc", "safety_margin_kwh",
+    "peak_shaving", "contracted_power_w",
+    "guaranteed_floor_soc", "safety_margin_pct",
 }
 _EXPECTED_KEYS = {
     "reason", "total_kwh", "windows", "no_slot_before", "no_slot_after",
@@ -273,7 +273,7 @@ class Outcome:
             f" power={request.effective_power_kw:.3f} kW"
             f" value_efficiency={request.import_value_efficiency}"
             f" margin={request.import_value_margin}"
-            f" reserve_holds={request.reserve_holds}"
+            f" hold_allowed={request.hold_allowed}"
             f" from_deadlines={request.required_from_deadlines}",
         ]
         lines += [
@@ -293,7 +293,7 @@ def _run_allocator(scenario: Scenario) -> Outcome:
     if (
         settings["peak_shaving"] is not None
         or settings["guaranteed_floor_soc"] is not None
-        or settings["safety_margin_kwh"]
+        or settings["safety_margin_pct"]
         or (scenario.solar_remaining_kwh > 0 and not scenario.solar_periods)
     ):
         raise ScenarioError(
@@ -354,7 +354,6 @@ def _run_allocator(scenario: Scenario) -> Outcome:
         slot_ceilings=slot_ceilings,
         import_value_efficiency=efficiency if scenario.valued else None,
         import_value_margin=margin if scenario.valued else 0.0,
-        reserve_holds=scenario.valued and settings["discharge_reserve"],
         grid_carries_load_while_charging=True,
         grid_ceiling_kw=contracted_kw,
     )
@@ -484,11 +483,8 @@ def _controller(scenario: Scenario) -> SimpleNamespace:
         capacity_protection_soc_threshold=peak["soc_threshold"] if peak else 0,
         _predictive_min_soc_floor_enabled=floor is not None,
         _predictive_min_soc_floor=floor or 0.0,
-        _predictive_safety_margin_kwh=settings["safety_margin_kwh"],
-        _discharge_reserve_mgr=SimpleNamespace(
-            feature_enabled=lambda: bool(settings["discharge_reserve"]),
-            mark_stale=lambda _reason: None,
-        ),
+        _predictive_safety_margin_pct=settings["safety_margin_pct"],
+        _discharge_reserve_mgr=SimpleNamespace(mark_stale=lambda _reason: None),
         # Features the bank does not model: off.
         dp_price_discharge_control=False,
         discharge_price_threshold=None,
@@ -662,7 +658,7 @@ def _check_wiring(scenario: Scenario, request, decision: dict) -> None:
             if scenario.valued
             else 0.0
         ),
-        "reserve_holds": bool(scenario.valued and settings["discharge_reserve"]),
+        "hold_allowed": True,
     }
     wrong = {
         name: (getattr(request, name), value)

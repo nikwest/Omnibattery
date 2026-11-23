@@ -17,6 +17,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
+from .drivers.base import can_take_setpoint
 from .drivers.registry import redact_keys
 
 # Identifiers and user sensor references that could deanonymise the dump.
@@ -444,25 +445,10 @@ def _surplus_hold_info(controller) -> dict[str, Any]:
 
 
 def _discharge_reserve_info(controller) -> dict[str, Any]:
-    """Return price-aware discharge-reserve diagnostics.
-
-    The manager already publishes a JSON-safe snapshot, so this only adds the
-    configuration that explains it.
-    """
+    """Return the Dynamic Pricing plan's hold now (#888)."""
     if controller is None:
         return {"status": "unavailable", "reason": "controller_unavailable"}
-    manager = getattr(controller, "_discharge_reserve_mgr", None)
-    info: dict[str, Any] = {
-        "enabled": bool(getattr(controller, "discharge_reserve_enabled", False)),
-        "min_saving": getattr(controller, "discharge_reserve_min_saving", None),
-        "applied_soc_pct": getattr(controller, "_price_reserve_soc_pct", None),
-    }
-    if manager is None:
-        info["status"] = "unavailable"
-        info["reason"] = "manager_unavailable"
-        return info
-    info.update(manager.get_status())
-    return info
+    return dict(getattr(controller, "_plan_hold_status", None) or {})
 
 
 def _high_price_discharge_info(controller) -> dict[str, Any]:
@@ -507,9 +493,6 @@ def _dynamic_pricing_info(controller) -> dict[str, Any]:
         ),
         "surplus_price_hold_enabled": getattr(
             controller, "surplus_price_hold_enabled", False
-        ),
-        "discharge_reserve_enabled": getattr(
-            controller, "discharge_reserve_enabled", False
         ),
         "export_price_sensor": getattr(controller, "export_price_sensor", None),
         "export_price_integration_type": getattr(
@@ -887,7 +870,7 @@ async def async_get_config_entry_diagnostics(
                 "battery_manual_mode_enabled": bool(
                     getattr(coord, "battery_manual_mode_enabled", False)
                 ),
-                "automatic_pool": not bool(
+                "automatic_pool": can_take_setpoint(coord) and not bool(
                     getattr(coord, "battery_manual_mode_enabled", False)
                 ),
             },
@@ -902,7 +885,9 @@ async def async_get_config_entry_diagnostics(
     automatic_batteries = [
         coord.name for coord in coordinators
         if not getattr(coord, "battery_manual_mode_enabled", False)
+        and can_take_setpoint(coord)
     ]
+    mode_manager = getattr(controller, "_autonomous_mode_mgr", None)
 
     consumption_profile = {}
     solar_profile = {}
@@ -946,6 +931,9 @@ async def async_get_config_entry_diagnostics(
             "manual_batteries": manual_batteries,
             "automatic_batteries": automatic_batteries,
         },
+        "autonomous_batteries": (
+            _json_safe(mode_manager.diagnostics()) if mode_manager is not None else {}
+        ),
         "dynamic_pricing": _dynamic_pricing_info(controller),
         "daily_operation_timeline": _daily_operation_timeline_summary(controller),
         "consumption_profile": consumption_profile,

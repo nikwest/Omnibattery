@@ -42,7 +42,6 @@ from .const import (
     DEFAULT_NEGATIVE_INJECTION_THRESHOLD,
     DEFAULT_PREDISCHARGE_RESERVE_SOC,
     CONF_SURPLUS_PRICE_HOLD_ENABLED,
-    CONF_DISCHARGE_RESERVE_ENABLED,
     MIN_CHARGE_HYSTERESIS_PERCENT,
     MAX_CHARGE_HYSTERESIS_PERCENT,
     DOMAIN,
@@ -58,7 +57,9 @@ from .drivers.base import (
     KEY_SET_CHARGE_POWER,
     KEY_SET_DISCHARGE_POWER,
     canonical_key,
+    is_observed,
 )
+from .energy import effective_round_trip_efficiency
 from .infra.coordinator import MarstekVenusDataUpdateCoordinator
 from .infra.manual_control import assert_manual_control
 from .infra.entity_naming import (
@@ -107,6 +108,15 @@ async def async_setup_entry(
         for definition in coordinator.number_definitions:
             entities.append(MarstekVenusNumber(coordinator, definition))
 
+        # A battery that takes no power command gets none of the controls below.
+        # Every one of them exists to shape a set-point this integration will
+        # never send: software SOC limits the PD loop would enforce, manual power
+        # targets, soft power ceilings. Creating them would offer the user knobs
+        # that quietly do nothing. Its own driver-declared numbers (the optional
+        # target SOC) are added by the loop above and are unaffected.
+        if is_observed(coordinator):
+            continue
+
         # For batteries without hardware SOC cutoff registers (v3/vA/vD), expose
         # software-enforced max/min SOC as live-editable entities. The PD controller
         # already enforces these in software; previously they were only changeable
@@ -151,7 +161,6 @@ async def async_setup_entry(
     # dynamic pricing; their sliders would otherwise render on time-slot installs.
     dynamic_pricing_only = {
         CONF_SURPLUS_PRICE_HOLD_ENABLED,
-        CONF_DISCHARGE_RESERVE_ENABLED,
     }
     is_dynamic_pricing = (
         entry.data.get(CONF_PREDICTIVE_CHARGING_MODE) == PREDICTIVE_MODE_DYNAMIC_PRICING
@@ -561,17 +570,7 @@ class ConfigNumberEntity(NumberEntity):
     @property
     def native_value(self):
         """Return the current value from config_entry.data, in display units."""
-        default = self._definition["default"]
-        if callable(default):
-            # The same fleet the controller sizes it to, reported capacities included.
-            controller = (
-                (getattr(self.hass, "data", None) or {}).get(DOMAIN, {})
-                .get(getattr(self.entry, "entry_id", None), {})
-                .get("controller")
-            )
-            reported = getattr(controller, "_reported_battery_capacity_kwh", None)
-            default = default(self.entry.data, reported() if callable(reported) else None)
-        raw = self.entry.data.get(self._key, default)
+        raw = self.entry.data.get(self._key, self._definition["default"])
         return raw / self._scale
 
     async def async_set_native_value(self, value: float) -> None:
@@ -625,6 +624,9 @@ class ArbitrageNumber(NumberEntity):
         self.entry = entry
         self._kind = kind
         is_margin = kind == "margin"
+        # The measured efficiency moves with the batteries, not with the entry:
+        # polled, so the value shown and its "measured" tag stay current.
+        self._attr_should_poll = not is_margin
         key = CONF_MIN_ARBITRAGE_MARGIN if is_margin else CONF_ROUND_TRIP_EFFICIENCY
         self._conf_key = key
         self._attr_translation_key = key
@@ -650,18 +652,49 @@ class ArbitrageNumber(NumberEntity):
     async def _handle_entry_update(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.async_write_ha_state()
 
+    def _controller(self):
+        return (
+            (getattr(self.hass, "data", None) or {}).get(DOMAIN, {})
+            .get(getattr(self.entry, "entry_id", None), {})
+            .get("controller")
+        )
+
     @property
     def native_value(self):
-        """The margin, 0 while unset (both mean off); efficiency falls back to the default.
+        """The margin, 0 while unset (both mean off); the efficiency in use.
 
         An unset margin used to be ``unknown``, which the panel drops as a
         leftover, so the slider never appeared on installs that had not set
         one. Every reader treats unset and 0 alike (``<= 0`` / ``or 0.0``).
+
+        Without a stored efficiency the slider shows what the engine uses: the
+        measured fleet value, or the default while no battery has enough
+        history.
         """
         if self._kind == "margin":
             value = self.entry.data.get(self._conf_key)
             return 0.0 if value is None else value
-        return self.entry.data.get(self._conf_key, DEFAULT_ROUND_TRIP_EFFICIENCY)
+        stored = self.entry.data.get(self._conf_key)
+        if stored is not None:
+            return stored
+        controller = self._controller()
+        if controller is None:
+            return DEFAULT_ROUND_TRIP_EFFICIENCY
+        return round(effective_round_trip_efficiency(controller)[0], 4)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """For the efficiency: whether it follows the measured value."""
+        if self._kind == "margin":
+            return None
+        uses_default = self._conf_key not in self.entry.data
+        controller = self._controller()
+        source = effective_round_trip_efficiency(controller)[1] if controller else "default"
+        return {
+            "uses_default": uses_default,
+            # "measured" tags the panel slider; "default" while there is no history.
+            "default_kind": source if uses_default else None,
+        }
 
     async def async_set_native_value(self, value: float) -> None:
         """Persist to config_entry.data; the controller re-reads on the update listener."""
@@ -945,6 +978,7 @@ class ExcludedDeviceExclusionPctNumber(NumberEntity):
 
         self._attr_has_entity_name = True
         self._attr_translation_key = "excluded_device_exclusion_pct"
+        self._device_label = friendly
         self._attr_translation_placeholders = {"device": friendly}
         self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}exclusion_pct_{index}"
         self.entity_id = system_entity_id("number", f"exclusion_pct_{index}")
@@ -963,6 +997,20 @@ class ExcludedDeviceExclusionPctNumber(NumberEntity):
 
     async def _handle_entry_update(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Panel grouping, plus whether the percentage applies at all.
+
+        Only an excluded device (the home sensor includes it) is scaled by
+        this; for an additional device it does nothing, so the panel hides it.
+        """
+        from .switch import excluded_device_attributes
+
+        attrs = excluded_device_attributes(self.entry, self._device_index, self._device_label)
+        if attrs:
+            attrs["applies"] = attrs["type"] == "excluded"
+        return attrs
 
     @property
     def native_value(self) -> float:

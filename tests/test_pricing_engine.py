@@ -975,7 +975,7 @@ def test_refresh_solar_forecast_reference_disarms_the_trigger():
 def _balance_ctrl(**overrides):
     """Controller stub carrying only the balance knobs the fingerprint reads."""
     base = dict(
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         _predictive_min_soc_floor=20.0,
         _predictive_min_soc_floor_enabled=True,
         coordinators=[SimpleNamespace(device_key="b1", min_soc=12, max_soc=95)],
@@ -999,7 +999,7 @@ def test_balance_fingerprint_moves_with_a_per_battery_soc_limit():
 
 def test_balance_fingerprint_moves_with_the_predictive_knobs():
     for field, value in (
-        ("_predictive_safety_margin_kwh", 1.5),
+        ("_predictive_safety_margin_pct", 15.0),
         ("_predictive_min_soc_floor", 35.0),
         ("_predictive_min_soc_floor_enabled", False),
     ):
@@ -1035,9 +1035,8 @@ def test_balance_fingerprint_moves_with_the_slot_and_weekly_knobs(field, before,
 
 def test_balance_fingerprint_ignores_settings_read_live():
     # Read every cycle, so a change needs no re-plan.
-    ctrl = _balance_ctrl(discharge_reserve_min_saving=0.02)
+    ctrl = _balance_ctrl(surplus_hold_min_saving=0.02)
     before = _fingerprint(ctrl)
-    ctrl.discharge_reserve_min_saving = 0.05
     ctrl.surplus_hold_min_saving = 0.03
     assert _fingerprint(ctrl) == before
 
@@ -1078,7 +1077,6 @@ def test_dynamic_pricing_rebuilds_once_on_a_dirty_configuration():
     manager._maybe_refresh_service_prices = _async_noop
     manager._check_dp_pre_slot_reevaluation = _async_noop
     manager._refresh_surplus_hold_plan = _async_noop
-    manager._refresh_discharge_reserve_plan = _async_noop
     manager._is_evening_reevaluation_time = lambda: False
     manager._is_dp_soc_drop_reeval = lambda: False
     manager._evaluate_dynamic_pricing = _evaluate
@@ -1122,7 +1120,6 @@ def test_a_configuration_change_re_plans_once_the_settings_stand_still():
     manager._maybe_refresh_service_prices = _async_noop
     manager._check_dp_pre_slot_reevaluation = _async_noop
     manager._refresh_surplus_hold_plan = _async_noop
-    manager._refresh_discharge_reserve_plan = _async_noop
     manager._is_evening_reevaluation_time = lambda: False
     manager._is_dp_soc_drop_reeval = lambda: False
     manager._evaluate_dynamic_pricing = _evaluate
@@ -1171,7 +1168,6 @@ def _publication_mgr(ctrl, evaluate=None):
     manager._maybe_refresh_service_prices = _async_noop
     manager._check_dp_pre_slot_reevaluation = _async_noop
     manager._refresh_surplus_hold_plan = _async_noop
-    manager._refresh_discharge_reserve_plan = _async_noop
     manager._is_evening_reevaluation_time = lambda: False
     manager._is_dp_soc_drop_reeval = lambda: False
     if evaluate is not None:
@@ -1242,7 +1238,6 @@ def test_first_cycle_after_midnight_resets_the_day_and_does_not_re_plan():
         "_reset_predictive_demand_runtime",
         "clear_curtailment_runtime",
         "_clear_surplus_hold",
-        "_clear_discharge_reserve",
         "_clear_plan_orders",
     ):
         setattr(manager, name, lambda *_args: None)
@@ -1262,6 +1257,77 @@ def test_first_cycle_after_midnight_resets_the_day_and_does_not_re_plan():
 
     assert len(calls) == 1
     assert ctrl._dp_solar_forecast_reeval_count == 0
+
+
+def _new_day_reset_ctrl(projection_end):
+    midnight = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    hold = PriceSlot(midnight, midnight + timedelta(hours=6, minutes=30), 0.40)
+    export = PriceSlot(midnight + timedelta(hours=10), midnight + timedelta(hours=11), 0.05)
+    room = object()
+    ctrl = _publication_ctrl(
+        _dynamic_pricing_evaluated_date=midnight.date() - timedelta(days=1),
+        _dp_eval_retry_count=0,
+        _dp_plan_holds=frozenset({hold}),
+        _dp_plan_weekly_holds=frozenset({hold}),
+        _dp_weekly_full_at=midnight - timedelta(hours=1),
+        _dp_plan_exports=frozenset({export}),
+        _dp_export_decision=None,
+        _dp_plan_sales={export: 1.0},
+        _dp_plan_solar_delay=True,
+        _dp_plan_room=room,
+        _dp_eval_projection=(
+            None
+            if projection_end is None
+            else ((midnight + projection_end, -1.0),)
+        ),
+    )
+    manager = _publication_mgr(ctrl)
+    for name in (
+        "_reset_predictive_demand_runtime",
+        "clear_curtailment_runtime",
+        "_clear_surplus_hold",
+    ):
+        setattr(manager, name, lambda *_args: None)
+    return ctrl, manager, hold, export, room
+
+
+def test_new_day_reset_keeps_the_orders_of_a_plan_that_reaches_past_midnight():
+    """2026-11-19: the evening plan held the battery until 06:30. The reset at
+    00:00 dropped its holds and the 00:05 evaluation brought them back, so the
+    battery was left to the modules for five minutes and discharged in the
+    night's cheapest quarter."""
+    ctrl, manager, hold, export, room = _new_day_reset_ctrl(timedelta(hours=24))
+
+    asyncio.run(manager.handle_dynamic_pricing_predictive_charging())
+
+    assert ctrl._dynamic_pricing_evaluated_date is None  # the day was reset
+    assert ctrl._dp_plan_holds == frozenset({hold})
+    assert ctrl._dp_plan_weekly_holds == frozenset({hold})
+    assert ctrl._dp_plan_exports == frozenset({export})
+    assert ctrl._dp_plan_sales == {export: 1.0}
+    assert ctrl._dp_plan_solar_delay is True
+    assert ctrl._dp_plan_room is room
+    # The triggers' references are reset as before.
+    assert ctrl._dp_weekly_full_at is None
+    assert ctrl._dp_eval_projection is None
+
+
+@pytest.mark.parametrize("projection_end", [timedelta(0), None])
+def test_new_day_reset_drops_the_orders_of_a_plan_that_ended_at_midnight(projection_end):
+    """A plan up to the last price of the day (or none) says nothing about
+    the new day: the modules decide until the 00:05 evaluation, as before."""
+    ctrl, manager, *_ = _new_day_reset_ctrl(projection_end)
+
+    asyncio.run(manager.handle_dynamic_pricing_predictive_charging())
+
+    assert ctrl._dynamic_pricing_evaluated_date is None
+    assert ctrl._dp_plan_holds is None
+    assert ctrl._dp_plan_weekly_holds is None
+    assert ctrl._dp_weekly_full_at is None
+    assert ctrl._dp_plan_exports is None
+    assert ctrl._dp_plan_sales is None
+    assert ctrl._dp_plan_solar_delay is False
+    assert ctrl._dp_plan_room is None
 
 
 def test_price_publication_reeval_disarmed_when_the_daily_eval_already_saw_tomorrow():
@@ -1487,7 +1553,6 @@ def _reevaluation_trigger_calls(*, evening, soc_drop):
     manager._maybe_refresh_service_prices = _async_noop
     manager._check_dp_pre_slot_reevaluation = _async_noop
     manager._refresh_surplus_hold_plan = _async_noop
-    manager._refresh_discharge_reserve_plan = _async_noop
     manager._is_evening_reevaluation_time = lambda: evening
     manager._is_dp_soc_drop_reeval = lambda: soc_drop
     manager._evaluate_dynamic_pricing = _evaluate
@@ -2019,7 +2084,7 @@ def test_energy_balance_accepts_remaining_horizon_overrides():
         predictive_charging_enabled=True,
         predictive_charging_overridden=False,
         coordinators=[coordinator],
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         _predictive_min_soc_floor=0.0,
         _predictive_min_soc_floor_enabled=False,
         _daily_consumption_history=[],
@@ -2206,7 +2271,7 @@ def test_extended_chronological_plan_uses_consumption_shape_by_date():
     ctrl = _controller(
         _consumption_tracker=tracker,
         solar_profile_mode="off",
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         coordinators=[],
         _is_battery_manual_owned=lambda _coordinator: False,
         max_contracted_power=0.0,
@@ -2257,7 +2322,7 @@ def test_extended_projection_adapter_is_read_only_for_dashboard_callers():
     ctrl = _controller(
         _consumption_tracker=tracker,
         solar_profile_mode="off",
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         coordinators=[],
         _is_battery_manual_owned=lambda _coordinator: False,
         max_contracted_power=0.0,
@@ -2304,7 +2369,7 @@ def test_time_slot_window_plan_keeps_the_house_load_for_the_panel():
     ctrl = _controller(
         _consumption_tracker=tracker,
         solar_profile_mode="off",
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         coordinators=[],
         _is_battery_manual_owned=lambda _coordinator: False,
         max_contracted_power=0.0,
@@ -2361,8 +2426,8 @@ def test_plan_rows_for_the_panel_carry_the_house_not_the_battery_drain():
 
 def test_panel_sun_is_drawn_without_the_safety_margin():
     """15 Nov 2026: 3.2 kWh forecast for tomorrow morning and a 6 kWh safety
-    margin drew no sun at all. The margin stays in the plan's own intervals;
-    the panel's series carry the forecast."""
+    margin drew no sun at all. The margin (now a share of the sun) stays in
+    the plan's own intervals; the panel's series carry the forecast."""
     madrid = ZoneInfo("Europe/Madrid")
     now = datetime(2026, 11, 15, 22, 45, tzinfo=madrid)
     midnight = now.replace(hour=0, minute=0) + timedelta(days=1)
@@ -2384,7 +2449,7 @@ def test_panel_sun_is_drawn_without_the_safety_margin():
     ctrl = _controller(
         _consumption_tracker=tracker,
         solar_profile_mode="active",
-        _predictive_safety_margin_kwh=6.0,
+        _predictive_safety_margin_pct=25.0,
         coordinators=[],
         _is_battery_manual_owned=lambda _coordinator: False,
         max_contracted_power=0.0,
@@ -2407,12 +2472,10 @@ def test_panel_sun_is_drawn_without_the_safety_margin():
     )
     plan = result.plan
 
-    # 16 Nov 2026: the panel warned "no solar forecast left" over a drawn
-    # forecast, because the margin ate the plan's budget. The notice follows
-    # the drawn curve.
-    assert result.diagnostics["solar_timeline_fallback_reason"] == "zero_budget"
+    # A share of the sun never eats the whole budget (a flat 6 kWh did).
+    assert result.diagnostics["solar_timeline_fallback_reason"] is None
     assert result.diagnostics["solar_shown_fallback_reason"] is None
-    assert sum(i.solar_kwh for i in plan.intervals) == 0.0
+    assert sum(i.solar_kwh for i in plan.intervals) == pytest.approx(2.4)
     assert sum(i.solar_kwh for i in plan.shown_intervals) == pytest.approx(3.2)
     assert sum(solar for solar, _house in plan.house_forecast.values()) == (
         pytest.approx(3.2)
@@ -2436,7 +2499,7 @@ def test_extended_projection_survives_the_autumn_dst_change():
     ctrl = _controller(
         _consumption_tracker=tracker,
         solar_profile_mode="off",
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         coordinators=[],
         _is_battery_manual_owned=lambda _coordinator: False,
         max_contracted_power=0.0,
@@ -3362,7 +3425,7 @@ def test_daily_profile_consumes_energy_horizon_end():
         predictive_charging_enabled=True,
         predictive_charging_overridden=False,
         coordinators=[coordinator],
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         _predictive_min_soc_floor=0.0,
         _predictive_min_soc_floor_enabled=False,
         _daily_consumption_history=[],
@@ -3409,7 +3472,7 @@ def test_daily_profile_scope_publishes_energy_horizon_end():
         predictive_charging_enabled=True,
         predictive_charging_overridden=False,
         coordinators=[coordinator],
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         _predictive_min_soc_floor=0.0,
         _predictive_min_soc_floor_enabled=False,
         _daily_consumption_history=[],
@@ -3460,7 +3523,7 @@ def test_remaining_scope_does_not_publish_daily_profile_horizon():
             max_soc=95.0,
         )
     ]
-    ctrl._predictive_safety_margin_kwh = 0.0
+    ctrl._predictive_safety_margin_pct = 0.0
     ctrl._predictive_min_soc_floor = 0.0
     ctrl._predictive_min_soc_floor_enabled = False
     ctrl.hass = SimpleNamespace(states=SimpleNamespace(get=lambda _entity_id: None))
@@ -3789,7 +3852,7 @@ def test_control_horizon_persists_but_dashboard_projection_does_not():
     ctrl = _controller(
         _consumption_tracker=tracker,
         solar_profile_mode="off",
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         coordinators=[],
         _is_battery_manual_owned=lambda _coordinator: False,
         max_contracted_power=0.0,
@@ -3878,11 +3941,9 @@ def test_midnight_reset_retains_post_midnight_slots(monkeypatch):
     manager._is_excluded_demand_reeval = lambda _now: False
     manager._is_solar_forecast_reeval = lambda _now: False
     manager._refresh_surplus_hold_plan = _async_noop
-    manager._refresh_discharge_reserve_plan = _async_noop
     manager._reset_predictive_demand_runtime = lambda: None
     manager.clear_curtailment_runtime = lambda _reason: None
     manager._clear_surplus_hold = lambda _reason: None
-    manager._clear_discharge_reserve = lambda _reason: None
 
     asyncio.run(manager.handle_dynamic_pricing_predictive_charging())
 
@@ -4243,7 +4304,7 @@ def _planner_fallback_rig(monkeypatch):
             forecast_consumption_between=forecast_between,
         ),
         solar_profile_mode="off",
-        _predictive_safety_margin_kwh=0.0,
+        _predictive_safety_margin_pct=0.0,
         coordinators=[],
         _is_battery_manual_owned=lambda _coordinator: False,
         max_contracted_power=0.0,

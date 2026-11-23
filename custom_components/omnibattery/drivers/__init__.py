@@ -23,6 +23,8 @@ Drivers:
     (SolidFlex / PowerFlex).
   - ``victron``: Modbus-TCP to a GX device, set-points via ESS external
     control (Multiplus/Quattro); GX values named by D-Bus service + path.
+  - ``generic_ha``: HA-entity based, push, read-only (a battery another
+    integration already reports; never commanded).
 
 See ``docs/plans/driver_abstraction.md`` for the phased extraction plan.
 """
@@ -45,6 +47,7 @@ from .sessy import SessyLocalDriver
 from .hoymiles import HoymilesMqttDriver
 from .huawei import HuaweiSolarDriver
 from .indevolt import IndevoltDriver
+from .generic_ha import GenericHaEntityDriver
 
 __all__ = [
     "DELIVERED_AC_POWER_KEY",
@@ -60,5 +63,6 @@ __all__ = [
     "SessyLocalDriver",
     "HoymilesMqttDriver",
     "HuaweiSolarDriver",
+    "GenericHaEntityDriver",
     "IndevoltDriver",
 ]

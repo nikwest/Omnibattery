@@ -23,7 +23,6 @@ from .const import (
     CONF_TEMP_LIMIT_APPLY_DISCHARGE,
     CONF_ENABLE_HOURLY_BALANCE,
     CONF_SURPLUS_PRICE_HOLD_ENABLED,
-    CONF_DISCHARGE_RESERVE_ENABLED,
     CONF_ENABLE_SYSTEM_POWER_LIMITS,
     CONF_ENABLE_WEEKLY_FULL_CHARGE,
     CONF_ENABLE_WEEKLY_FULL_CHARGE_DELAY,
@@ -56,7 +55,7 @@ from .const import (
     CONF_THREE_PHASE_ENABLED,
     NOTIFICATION_ID_PREFIX,
 )
-from .drivers.base import KEY_RS485_CONTROL_MODE
+from .drivers.base import KEY_RS485_CONTROL_MODE, can_take_setpoint
 from .infra.coordinator import MarstekVenusDataUpdateCoordinator
 from .infra.entity_naming import (
     english_entity_id,
@@ -83,7 +82,10 @@ async def async_setup_entry(
     for coordinator in coordinators:
         for definition in coordinator.switch_definitions:
             entities.append(MarstekVenusSwitch(coordinator, definition))
-        if controller:
+        # Allow charge / allow discharge / manual ownership all decide what the
+        # controller may command on this battery. There is nothing to permit or
+        # withhold on one that takes no command.
+        if controller and can_take_setpoint(coordinator):
             entities.append(BatteryAllowChargeSwitch(hass, entry, controller, coordinator))
             entities.append(BatteryAllowDischargeSwitch(hass, entry, controller, coordinator))
             entities.append(BatteryManualModeSwitch(hass, entry, controller, coordinator))
@@ -182,10 +184,10 @@ async def async_setup_entry(
     if controller and CONF_ENABLE_HOURLY_BALANCE in entry.data:
         entities.append(HourlyBalanceSwitch(hass, entry, controller))
 
-    # Price-aware export/reserve features. Their keys are backfilled on every
-    # entry at setup, so presence says nothing about the active mode; both
-    # bail out unless the predictive mode is dynamic pricing (see
-    # surplus_price_hold.py, discharge_reserve.py; high-price sale is a select),
+    # Price-aware export features. Their keys are backfilled on every entry at
+    # setup, so presence says nothing about the active mode; they bail out
+    # unless the predictive mode is dynamic pricing (see surplus_price_hold.py;
+    # high-price sale is a select),
     # so on time-slot installs the toggles would be dead
     # rows on the dashboard.
     if (
@@ -194,8 +196,6 @@ async def async_setup_entry(
     ):
         if CONF_SURPLUS_PRICE_HOLD_ENABLED in entry.data:
             entities.append(SurplusPriceHoldSwitch(hass, entry, controller))
-        if CONF_DISCHARGE_RESERVE_ENABLED in entry.data:
-            entities.append(DischargeReserveSwitch(hass, entry, controller))
 
     # Add system power limits switch when the feature is configured. Mirrors the
     # number-platform heuristic so the toggle appears exactly when its sliders do
@@ -1271,6 +1271,27 @@ class WeeklyFullChargeDelaySwitch(SwitchEntity):
         }
 
 
+def excluded_device_attributes(entry: ConfigEntry, index: int, label: str) -> dict:
+    """Attributes every per-device excluded-device entity carries.
+
+    The panel groups a device's rows by ``excluded_device_index``, sorts by
+    ``excluded_device`` and shows ``type``: excluded (the home sensor includes
+    it, the battery does not power it) or additional (the battery covers it).
+    """
+    devices = entry.data.get("excluded_devices", [])
+    if index >= len(devices):
+        return {}
+    device = devices[index]
+    included = device.get("included_in_consumption", True)
+    return {
+        "power_sensor": device.get("power_sensor", ""),
+        "included_in_consumption": included,
+        "type": "excluded" if included else "additional",
+        "excluded_device": label,
+        "excluded_device_index": index,
+    }
+
+
 class ExcludedDeviceEnabledSwitch(SwitchEntity):
     """Switch to enable/disable an individual excluded device at runtime.
 
@@ -1286,6 +1307,7 @@ class ExcludedDeviceEnabledSwitch(SwitchEntity):
 
         device = entry.data.get("excluded_devices", [])[index]
         friendly = excluded_device_name(hass, device)
+        self._device_label = friendly
 
         self._attr_has_entity_name = True
         self._attr_translation_key = "excluded_device_enabled"
@@ -1305,15 +1327,8 @@ class ExcludedDeviceEnabledSwitch(SwitchEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        """Return the power sensor entity as an attribute."""
-        devices = self.entry.data.get("excluded_devices", [])
-        if self._device_index >= len(devices):
-            return {}
-        device = devices[self._device_index]
-        return {
-            "power_sensor": device.get("power_sensor", ""),
-            "included_in_consumption": device.get("included_in_consumption", True),
-        }
+        """The device's power sensor, type, name and index (panel grouping)."""
+        return excluded_device_attributes(self.entry, self._device_index, self._device_label)
 
     async def _update_enabled(self, enabled: bool) -> None:
         """Update enabled state for this device in config_entry.data."""
@@ -1367,6 +1382,7 @@ class ExcludedDeviceSolarSurplusSwitch(SwitchEntity):
 
         device = entry.data.get("excluded_devices", [])[index]
         friendly = excluded_device_name(hass, device)
+        self._device_label = friendly
 
         self._attr_has_entity_name = True
         self._attr_translation_key = "excluded_device_solar_surplus"
@@ -1386,15 +1402,8 @@ class ExcludedDeviceSolarSurplusSwitch(SwitchEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        """Return the power sensor entity as an attribute."""
-        devices = self.entry.data.get("excluded_devices", [])
-        if self._device_index >= len(devices):
-            return {}
-        device = devices[self._device_index]
-        return {
-            "power_sensor": device.get("power_sensor", ""),
-            "included_in_consumption": device.get("included_in_consumption", True),
-        }
+        """The device's power sensor, type, name and index (panel grouping)."""
+        return excluded_device_attributes(self.entry, self._device_index, self._device_label)
 
     async def _update_solar_surplus(self, enabled: bool) -> None:
         """Update allow_solar_surplus for this device in config_entry.data."""
@@ -1443,6 +1452,7 @@ class ExcludedDeviceDynamicPowerControlSwitch(SwitchEntity):
 
         device = entry.data.get("excluded_devices", [])[index]
         friendly = excluded_device_name(hass, device)
+        self._device_label = friendly
 
         self._attr_has_entity_name = True
         self._attr_translation_key = "excluded_device_dynamic_power_control"
@@ -1468,10 +1478,9 @@ class ExcludedDeviceDynamicPowerControlSwitch(SwitchEntity):
             return {}
         device = devices[self._device_index]
         return {
-            "power_sensor": device.get("power_sensor", ""),
+            **excluded_device_attributes(self.entry, self._device_index, self._device_label),
             "activity_sensor": device.get("activity_sensor", ""),
             "allow_solar_surplus": device.get("allow_solar_surplus", False),
-            "included_in_consumption": device.get("included_in_consumption", True),
         }
 
     async def _update_dynamic_power_control(self, enabled: bool) -> None:
@@ -1528,6 +1537,7 @@ class ExcludedDeviceCoverHomeSwitch(SwitchEntity):
 
         device = entry.data.get("excluded_devices", [])[index]
         friendly = excluded_device_name(hass, device)
+        self._device_label = friendly
 
         self._attr_has_entity_name = True
         self._attr_translation_key = "excluded_device_cover_home"
@@ -1553,7 +1563,7 @@ class ExcludedDeviceCoverHomeSwitch(SwitchEntity):
             return {}
         device = devices[self._device_index]
         return {
-            "power_sensor": device.get("power_sensor", ""),
+            **excluded_device_attributes(self.entry, self._device_index, self._device_label),
             "allow_solar_surplus": device.get("allow_solar_surplus", False),
         }
 
@@ -2015,56 +2025,6 @@ class SurplusPriceHoldSwitch(SwitchEntity):
         new_data[CONF_SURPLUS_PRICE_HOLD_ENABLED] = False
         self.hass.config_entries.async_update_entry(self.entry, data=new_data)
         _LOGGER.info("Surplus Price Hold DISABLED")
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self):
-        """Return device information for the system."""
-        return {
-            "identifiers": {(DOMAIN, "marstek_venus_system")},
-            "name": "Omnibattery System",
-            "manufacturer": "Omnibattery",
-            "model": "Multi-Battery System",
-        }
-
-
-class DischargeReserveSwitch(SwitchEntity):
-    """Switch to enable/disable the price-aware discharge reserve."""
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
-        """Initialize the discharge reserve switch."""
-        self.hass = hass
-        self.entry = entry
-        self.controller = controller
-
-        self._attr_has_entity_name = True
-        self._attr_translation_key = "discharge_reserve"
-        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}discharge_reserve"
-        self.entity_id = system_entity_id("switch", "discharge_reserve")
-        self._attr_icon = "mdi:battery-lock"
-        self._attr_should_poll = False
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if the price-aware discharge reserve is enabled."""
-        return self.controller.discharge_reserve_enabled
-
-    async def async_turn_on(self, **kwargs) -> None:
-        """Enable the price-aware discharge reserve."""
-        self.controller.discharge_reserve_enabled = True
-        new_data = dict(self.entry.data)
-        new_data[CONF_DISCHARGE_RESERVE_ENABLED] = True
-        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-        _LOGGER.info("Discharge Reserve ENABLED")
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs) -> None:
-        """Disable the price-aware discharge reserve."""
-        self.controller.discharge_reserve_enabled = False
-        new_data = dict(self.entry.data)
-        new_data[CONF_DISCHARGE_RESERVE_ENABLED] = False
-        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-        _LOGGER.info("Discharge Reserve DISABLED")
         self.async_write_ha_state()
 
     @property

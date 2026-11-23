@@ -214,15 +214,14 @@ DEFAULT_BASE_CONSUMPTION_KWH = 5.0  # Fallback when no consumption history avail
 # day without real data, used only until real days are learned.
 MISSING_DAY_FLEET_SHARE = 0.8
 
-# Predictive charging / anti-curtailment safety margin.
-# How much the solar forecast is distrusted: this many kWh are subtracted from
-# it before predictive charging decides whether to charge, and the same margin
-# reserves anti-curtailment headroom in Dynamic Pricing. 0.0 is the sentinel
-# for "no margin" and also the fallback when the fleet's capacity is unknown
-# (see default_predictive_safety_margin_kwh() below: the margin used while
-# none is stored, sized to the fleet's configured or reported capacity).
+# Predictive charging / anti-curtailment safety margin: how much of the solar
+# forecast is distrusted, as a share of the forecast sun each place plans
+# against (0-50 %): kWh = pct / 100 x that sun, so a partial day or a two-day
+# horizon gives up its own share. No sun forecast means no margin.
+# The kWh key survives only for the v19 -> v20 migration that drops it.
 CONF_PREDICTIVE_SAFETY_MARGIN_KWH = "predictive_safety_margin_kwh"
-DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH = 0.0
+CONF_PREDICTIVE_SAFETY_MARGIN_PCT = "predictive_safety_margin_pct"
+DEFAULT_PREDICTIVE_SAFETY_MARGIN_PCT = 10.0
 
 # Legacy key, kept only for the v13->v14 migration that drops it. It inflated
 # the already-computed deficit, so it scaled inversely to the solar risk it
@@ -250,6 +249,10 @@ FLOOR_HYSTERESIS_PCT = 5
 CONF_ENABLE_WEEKLY_FULL_CHARGE = "enable_weekly_full_charge"
 CONF_MANUAL_MODE_ENABLED = "manual_mode_enabled"
 CONF_BATTERY_MANUAL_MODE_ENABLED = "battery_manual_mode_enabled"
+# Native mode the user asked of a battery that regulates on its own ("nom" or
+# "manual"). Unrelated to the manual ownership above: that one hands a battery
+# that does take setpoints to the user.
+CONF_AUTONOMOUS_REQUESTED_MODE = "autonomous_requested_mode"
 CONF_PREDICTIVE_CHARGING_OVERRIDDEN = "predictive_charging_overridden"
 CONF_WEEKLY_FULL_CHARGE_DAY = "weekly_full_charge_day"
 CONF_ENABLE_WEEKLY_FULL_CHARGE_DELAY = "enable_weekly_full_charge_delay"
@@ -780,8 +783,13 @@ def effective_battery_power_limits(battery) -> tuple[int, int]:
 
 def total_battery_power(data) -> tuple[int, int]:
     """Return summed static effective (charge_w, discharge_w) limits."""
-    batteries = data.get("batteries") or []
-    limits = [effective_battery_power_limits(battery) for battery in batteries]
+    from ..drivers.registry import traits_for_brand  # the drivers import this package
+
+    limits = [
+        effective_battery_power_limits(battery)
+        for battery in data.get("batteries") or []
+        if traits_for_brand(battery.get("brand"), battery).takes_power_setpoint
+    ]
     return (
         sum(charge_w for charge_w, _ in limits),
         sum(discharge_w for _, discharge_w in limits),
@@ -836,37 +844,6 @@ def effective_system_power(data) -> tuple[int, int]:
         min(charge_w, charge_cap) if charge_cap else charge_w,
         min(discharge_w, discharge_cap) if discharge_cap else discharge_w,
     )
-
-
-def total_battery_capacity_kwh(data, reported_kwh=None) -> float:
-    """Return the fleet's capacity in kWh: each battery's configured value, or what it reports.
-
-    A battery without a configured capacity -- one whose driver reads it (Marstek
-    over Modbus) or one left at 0 for auto-detection (Zendure, Hoymiles) -- counts
-    with ``reported_kwh[name]``, the capacity its coordinator reports, when known.
-    """
-    reported_kwh = reported_kwh or {}
-    total = 0.0
-    for battery in data.get("batteries") or []:
-        configured = float(battery.get("battery_capacity_kwh", 0.0) or 0.0)
-        if configured <= 0:
-            configured = float(reported_kwh.get(battery.get("name")) or 0.0)
-        total += max(0.0, configured)
-    return total
-
-
-def default_predictive_safety_margin_kwh(data, reported_kwh=None) -> float:
-    """Return ~5% of the fleet's total capacity, or the no-margin sentinel.
-
-    Mirrors ``default_high_price_discharge_max_power()``: the only forecast
-    buffer that means anything is sized to the fleet actually configured.
-    Falls back to ``DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH`` (0.0, no margin)
-    when no battery capacity can be determined yet.
-    """
-    capacity_kwh = total_battery_capacity_kwh(data, reported_kwh)
-    if capacity_kwh <= 0:
-        return DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH
-    return round(capacity_kwh * 0.05, 2)
 
 
 # PD Tuning Profiles
@@ -994,19 +971,6 @@ DEFAULT_SURPLUS_PRICE_HOLD_ENABLED = False
 # on rounding differences across the control cycle.
 CONF_SURPLUS_HOLD_MIN_SAVING = "surplus_hold_min_saving"
 DEFAULT_SURPLUS_HOLD_MIN_SAVING = 0.02
-
-# Price-aware discharge reserve.  The price_discharge blocker asks whether the
-# current hour is cheap; it never asks whether the dearer hours still ahead need
-# the energy that is in the battery.  This reserve raises each battery's
-# discharge floor by the energy those hours claim, and leaves everything above
-# it available for self-consumption now.  Dynamic pricing only, off by default.
-CONF_DISCHARGE_RESERVE_ENABLED = "discharge_reserve_enabled"
-DEFAULT_DISCHARGE_RESERVE_ENABLED = False
-# Advantage (currency/kWh) a later hour must have over the current one before
-# its demand may claim stored energy.  Keeps the floor from chattering on
-# rounding differences, and prices in the wear of the extra cycle.
-CONF_DISCHARGE_RESERVE_MIN_SAVING = "discharge_reserve_min_saving"
-DEFAULT_DISCHARGE_RESERVE_MIN_SAVING = 0.05
 
 # Deliberate export into a price peak (#270).  Sells only energy that a later,
 # dearer hour would otherwise buy from the grid, so the house never ends up
@@ -1294,16 +1258,13 @@ CONFIG_NUMBER_DEFINITIONS = [
         "condition": CONF_CAPACITY_PROTECTION_ENABLED,
     },
     {
-        "key": CONF_PREDICTIVE_SAFETY_MARGIN_KWH,
+        "key": CONF_PREDICTIVE_SAFETY_MARGIN_PCT,
         "name": "Solar Forecast Safety Margin",
-        "min": 0.0,
-        "max": 20.0,
-        "step": 0.1,
-        "unit": "kWh",
-        # Callable default: the slider must show the same 5%-of-capacity value
-        # the controller falls back to, or a new entry reads 0.0 on the panel
-        # while the engine hedges with something else.
-        "default": default_predictive_safety_margin_kwh,
+        "min": 0,
+        "max": 50,
+        "step": 1,
+        "unit": "%",
+        "default": DEFAULT_PREDICTIVE_SAFETY_MARGIN_PCT,
         "icon": "mdi:solar-power-variant",
         "condition": CONF_ENABLE_PREDICTIVE_CHARGING,
     },
@@ -1328,17 +1289,6 @@ CONFIG_NUMBER_DEFINITIONS = [
         "default": DEFAULT_SURPLUS_HOLD_MIN_SAVING,
         "icon": "mdi:transmission-tower-export",
         "condition": CONF_SURPLUS_PRICE_HOLD_ENABLED,
-    },
-    {
-        "key": CONF_DISCHARGE_RESERVE_MIN_SAVING,
-        "name": "Discharge Reserve Minimum Saving",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.001,
-        "unit": "/kWh",
-        "default": DEFAULT_DISCHARGE_RESERVE_MIN_SAVING,
-        "icon": "mdi:cash-minus",
-        "condition": CONF_DISCHARGE_RESERVE_ENABLED,
     },
     {
         "key": CONF_HOURLY_BALANCE_TARGET_NET_WH,

@@ -39,7 +39,7 @@ La batería puede estar en reposo intencionadamente cuando la red ya está cerca
 | Se alcanzó el SOC mínimo | `battery_discharge_blockers` y el SOC mínimo de batería | Espera a cargar o ajusta el límite deliberadamente |
 | La descarga está desactivada | **Allow Discharge** | Actívalo |
 | La franja horaria actual bloquea la descarga | **Discharge Window** e interruptores de franja horaria | Revisa las [franjas horarias](configuration/time-slots.md) |
-| El control de precio o reserva retiene energía | **Integration Status**, **Price-Based Discharge**, **Discharge Reserve** y estados relacionados | Revisa [Precio dinámico](configuration/predictive-charging/dynamic-pricing.md) |
+| El control de precio o reserva retiene energía | **Integration Status**, **Price-Based Discharge**, **Estado de reserva de descarga** y estados relacionados | Revisa [Precio dinámico](configuration/predictive-charging/dynamic-pricing.md) |
 | La protección de capacidad o lógica de carga excluida posee la respuesta | **Capacity Protection**, dispositivos excluidos activos y bloqueadores | Revisa [protección de capacidad](features/peak-shaving.md) y [exclusión de carga](features/load-exclusion.md) |
 | La batería no está disponible o está excluida | **Non-Responsive Batteries** y **Repairs** de Home Assistant | Sigue [Las entidades no están disponibles](#las-entidades-no-estan-disponibles) |
 
@@ -103,7 +103,7 @@ Durante hasta 65 segundos después de la última lectura, el valor bloqueado sig
 |---|---|---|
 | No se previó déficit de energía | Motivo de **Predictive Charging Active** y energía objetivo | No hace falta actuar si la energía almacenada y la previsión solar cubren la demanda |
 | Faltan datos de precio o previsión | `price_data_status`, previsión solar y disponibilidad de entidad fuente | Restaura la fuente descrita por tu [modo predictivo](configuration/predictive-charging/index.md) |
-| No hay periodo apto antes de la demanda | `chronological_plan_reason`, plazos, franjas seleccionadas e interruptores de franja | Ajusta el horario o el techo de precio |
+| No hay periodo apto antes de la demanda | `chronological_plan_reason`, plazos, franjas seleccionadas e interruptores de franja | Ajusta el horario o el techo de precio de carga |
 | La potencia de carga o capacidad libre es insuficiente | `deadline_shortfall_kwh`, SOC de batería, límite de carga y SOC objetivo | Aumenta un límite intencionado o acepta el déficit informado |
 | Otra función poseía la carga | `charge_blockers`, modo manual, retraso de carga o estado de franja horaria | Elimina la regla en conflicto |
 

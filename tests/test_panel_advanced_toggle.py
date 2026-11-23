@@ -22,24 +22,21 @@ ADV_KEYS = {
     "discharge_price_threshold",
     "min_arbitrage_margin",
     "round_trip_efficiency",
-    "predictive_safety_margin_kwh",
+    "predictive_safety_margin_pct",
     "min_soc_floor_enabled",
     "predictive_min_soc_floor",
     "negative_injection_threshold",
     "predischarge_reserve_soc",
     "surplus_hold_min_saving",
-    "discharge_reserve_min_saving",
 }
 
-# Function switches must stay visible even with Advanced off; only the
-# discharge-reserve threshold (not its switch) is a T2 addition marked `adv`.
+# Function switches must stay visible even with Advanced off.
 NOT_ADV_KEYS = {
     "predictive_charging",
     "negative_price_charging",
     "smart_predischarge",
     "surplus_price_hold",
     "high_price_sale",
-    "discharge_reserve",
 }
 
 

@@ -41,7 +41,9 @@ from homeassistant.util import dt as dt_util
 from ..infra.clock import local_now
 from ..energy import effective_round_trip_efficiency
 from ..const import PREDICTIVE_MODE_DYNAMIC_PRICING
+from ..drivers.base import can_take_setpoint
 from ..pricing import PriceSlot
+from ..pricing.calculations import solar_safety_margin_kwh
 from ..pricing.curtailment import distribute_solar_forecast
 from ..pricing.discharge_reserve import consumption_by_slot
 from ..pricing.plan_inputs import energy_over
@@ -267,7 +269,9 @@ class HighPriceDischargeManager:
         stop_soc = None if None in ends else math.floor(min(ends) + 1e-9)
         coords = [
             c for c in controller.coordinators
-            if c.data and not getattr(c, "battery_manual_mode_enabled", False)
+            if c.data
+            and not getattr(c, "battery_manual_mode_enabled", False)
+            and can_take_setpoint(c)
         ]
         current = (
             sum(float(c.data.get("battery_soc", 0) or 0) for c in coords) / len(coords)
@@ -322,7 +326,7 @@ class HighPriceDischargeManager:
             )
             cost = float(getattr(controller, "min_arbitrage_margin", 0.0) or 0.0)
             safety_margin = float(
-                getattr(controller, "_predictive_safety_margin_kwh", 0.0) or 0.0
+                getattr(controller, "_predictive_safety_margin_pct", 0.0) or 0.0
             )
         except (TypeError, ValueError):
             return None
@@ -335,7 +339,9 @@ class HighPriceDischargeManager:
             bool(getattr(controller, "high_price_discharge_enabled", False)),
             bool(getattr(controller, "high_price_surplus_export_enabled", False)),
             safety_margin,
-            not bool(getattr(controller, "discharge_reserve_enabled", False)),
+            # Chronological coverage unless the plan may hold the battery for
+            # later (#888): the previous allocator holds nothing (D2).
+            getattr(controller, "_dp_plan_holds", None) is None,
         )
 
     async def _fetch_solar_forecast(self) -> None:
@@ -379,7 +385,9 @@ class HighPriceDischargeManager:
             if now >= horizon_end:
                 horizon_end = pricing.energy_horizon_end(now)
             slots = self._build_horizon(pricing, now, horizon_end)
-            max_power_w, margin, trigger_2, trigger_1, safety_margin, chronological_coverage = config
+            # The safety margin is in the config only so a change rebuilds:
+            # it reaches the plan through the slots' solar.
+            max_power_w, margin, trigger_2, trigger_1, _safety_margin, chronological_coverage = config
             plan = plan_high_price_discharge(
                 slots,
                 pricing._curtailment_battery_snapshots(),
@@ -388,7 +396,6 @@ class HighPriceDischargeManager:
                 enabled=trigger_2,
                 trigger_1_enabled=trigger_1,
                 chronological_coverage=chronological_coverage,
-                safety_margin_kwh=safety_margin,
                 fill_slots=self._build_fill_slots(pricing, now, horizon_end) if trigger_1 else (),
                 additional_cost_per_kwh=margin,
                 max_export_power_w=max_power_w,
@@ -442,6 +449,12 @@ class HighPriceDischargeManager:
                 return []
             # No solar at all: zero is the truth, not a guess.
             forecast_kwh, fraction_fn = 0.0, None
+        # Less the safety margin, as the planner's projection that replaces
+        # this below when there is one.
+        forecast_kwh -= solar_safety_margin_kwh(
+            getattr(self._controller, "_predictive_safety_margin_pct", 0.0),
+            forecast_kwh,
+        )
         solar_by_slot = distribute_solar_forecast(
             slots, forecast_kwh, fraction_fn, normalize_future=True
         )

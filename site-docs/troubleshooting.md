@@ -53,7 +53,7 @@ The battery may be idle by design when the grid is already near target. If house
 | Minimum SOC reached | `battery_discharge_blockers` and the battery minimum SOC | Wait for charging or adjust the limit deliberately |
 | Discharging is disabled | **Allow Discharge** | Turn it on |
 | Current time slot blocks discharge | **Discharge Window** and time-slot switches | Review [time slots](configuration/time-slots.md) |
-| Price or reserve control is holding energy | **Integration Status**, **Price-Based Discharge**, **Discharge Reserve**, and related statuses | Review [Dynamic Pricing](configuration/predictive-charging/dynamic-pricing.md) |
+| Price or reserve control is holding energy | **Integration Status**, **Price-Based Discharge**, **Discharge Reserve Status**, and related statuses | Review [Dynamic Pricing](configuration/predictive-charging/dynamic-pricing.md) |
 | Capacity protection or excluded-load logic owns the response | **Capacity Protection**, active excluded devices, and blockers | Review [capacity protection](features/peak-shaving.md) and [load exclusion](features/load-exclusion.md) |
 | Battery is unavailable or excluded | **Non-Responsive Batteries** and Home Assistant **Repairs** | Follow [Entities are unavailable](#entities-are-unavailable) |
 
@@ -117,7 +117,7 @@ For up to 65 seconds after the last reading, the frozen value is still treated a
 |---|---|---|
 | No energy deficit was forecast | **Predictive Charging Active** reason and target energy | No action is needed if stored energy and forecast solar cover demand |
 | Price or forecast data is missing | `price_data_status`, solar forecast, and source entity availability | Restore the source described by your [predictive mode](configuration/predictive-charging/index.md) |
-| No eligible period exists before demand | `chronological_plan_reason`, deadlines, selected slots, and time-slot switches | Adjust the schedule or price ceiling |
+| No eligible period exists before demand | `chronological_plan_reason`, deadlines, selected slots, and time-slot switches | Adjust the schedule or the charge price ceiling |
 | Charge power or free capacity is insufficient | `deadline_shortfall_kwh`, battery SOC, charge limit, and target SOC | Increase an intentional limit or accept the reported shortfall |
 | Another feature owned charging | `charge_blockers`, manual mode, charge delay, or time-slot state | Remove the conflicting rule |
 

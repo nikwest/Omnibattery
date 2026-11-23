@@ -360,7 +360,9 @@ def test_the_plan_is_rebuilt_when_the_configuration_changes():
     assert len(rebuilds) == 2
 
 
-def test_reserve_toggle_passes_coverage_flag_and_rebuilds(monkeypatch):
+def test_the_plan_s_holds_pass_the_coverage_flag_and_rebuild(monkeypatch):
+    """#888: chronological coverage unless the plan may hold (its holds are
+    published); the previous allocator holds nothing."""
     import custom_components.omnibattery.control.high_price_discharge as runtime
 
     planner = Mock(wraps=runtime.plan_high_price_discharge)
@@ -371,12 +373,12 @@ def test_reserve_toggle_passes_coverage_flag_and_rebuilds(monkeypatch):
     manager.refresh_override()
     assert planner.call_count == 1
 
-    controller.discharge_reserve_enabled = True
+    controller._dp_plan_holds = frozenset()
     manager.refresh_override()
     assert planner.call_count == 2
     assert planner.call_args.kwargs["chronological_coverage"] is False
 
-    controller.discharge_reserve_enabled = False
+    controller._dp_plan_holds = None
     manager.refresh_override()
     assert planner.call_count == 3
     assert planner.call_args.kwargs["chronological_coverage"] is True
@@ -497,13 +499,14 @@ def test_surplus_only_flag_and_rebuild_on_toggle(monkeypatch):
     ))
     monkeypatch.setattr(runtime, "plan_high_price_discharge", planner)
     controller.high_price_surplus_export_enabled = True
-    controller._predictive_safety_margin_kwh = 0.4
+    controller._predictive_safety_margin_pct = 10.0
     manager._solar_wh_fetched_mono = runtime.monotonic()
     assert manager.feature_enabled()
     manager.refresh_override()
     assert planner.call_args.kwargs["enabled"] is False
     assert planner.call_args.kwargs["trigger_1_enabled"] is True
-    assert planner.call_args.kwargs["safety_margin_kwh"] == 0.4
+    # The margin reaches the plan through the slots' solar, not as a cushion.
+    assert "safety_margin_pct" not in planner.call_args.kwargs
     assert manager.get_status()["trigger_1_budget_kwh"] == 1.2
     assert manager.get_status()["refill_price"] == 0.1
     assert manager.get_status()["trigger_1_reason"] == "ready"
@@ -641,3 +644,22 @@ def test_solar_sunrise_key_does_not_dump_hour_into_first_quarter(monkeypatch):
                for i in range(8)]
     result = solar_wh_by_slot(quarter, keys, start)
     assert list(result.values()) == pytest.approx([.1] * 4 + [.2] * 4)
+
+
+def test_fallback_solar_loses_the_safety_margin_share():
+    """Without the planner's projection the slots' solar comes from the
+    curtailment model: it gives up the same share the projection would."""
+    pricing = _pricing(
+        _curtailment_forecast_model=lambda now: (
+            2.0, lambda hour: max(0.0, min(1.0, (hour - 18.0) / 2.0)), 0.0
+        )
+    )
+
+    def solar(pct):
+        manager, _controller, _setpoints = _manager(
+            pricing=pricing, _predictive_safety_margin_pct=pct
+        )
+        return sum(s.solar_kwh for s in manager._build_horizon(pricing, NOW, HORIZON_END))
+
+    assert solar(0.0) > 0.5
+    assert solar(25.0) == pytest.approx(0.75 * solar(0.0))

@@ -86,8 +86,8 @@ from .energyzero import (
     resolve_energyzero_source,
 )
 from ..control.max_soc_charge import MaxSocChargeManager
-from ..control.pack_soc import soc_vs_ceiling
-from ..drivers.base import has_solar_production_source
+from ..control.pack_soc import effective_min_soc, soc_vs_ceiling
+from ..drivers.base import can_take_setpoint, has_solar_production_source
 from ..tracking.consumption_profile import adjust_remaining_fallback_energy
 from ..energy import effective_round_trip_efficiency
 from . import (
@@ -154,6 +154,19 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _counts_towards_fleet_energy(controller, coordinator) -> bool:
+    """Whether a battery's kilowatt-hours belong in the chronological plan.
+
+    Delegates to the controller so there is one definition of "the fleet this
+    integration plans for". Falls back to the shared capability helper for the
+    test doubles that stand in for the controller here.
+    """
+    helper = getattr(controller, "_counts_towards_fleet_energy", None)
+    if helper is not None:
+        return bool(helper(coordinator))
+    return can_take_setpoint(coordinator)
 
 
 @dataclass(frozen=True)
@@ -281,6 +294,8 @@ class DynamicPricingEvaluationHorizon(Enum):
 # Points of fleet SOC below the plan's projected line that re-plan (step 10,
 # measured: 3 recovers 87 % of what a consumption-deviation rule did, 5 less).
 SOC_DROP_BELOW_PROJECTION = 3.0
+# The same points above the line re-plan too, once the plan is this old.
+SOC_RISE_MIN_PLAN_AGE = timedelta(hours=1)
 # After the plan's own completion time, how long a pending weekly full charge
 # waits for the manager to see 100 % before the plan is rebuilt: its cutoff
 # check takes seconds, and every minute after the slot the battery covers the
@@ -874,7 +889,9 @@ class PricingManager:
 
         coordinators_with_data = [
             c for c in self._controller.coordinators
-            if c.data and not getattr(c, "battery_manual_mode_enabled", False)
+            if c.data
+            and not getattr(c, "battery_manual_mode_enabled", False)
+            and _counts_towards_fleet_energy(self._controller, c)
         ]
         if not coordinators_with_data:
             _LOGGER.warning(
@@ -1767,6 +1784,7 @@ class PricingManager:
             getattr(coordinator, "data", None) is None
             or not getattr(coordinator, "is_available", True)
             or getattr(coordinator, "battery_manual_mode_enabled", False)
+            or not can_take_setpoint(coordinator)
             or not getattr(coordinator, "allow_charge", True)
             or getattr(coordinator, "rs485_user_disabled", False)
         ):
@@ -2240,6 +2258,7 @@ class PricingManager:
                 data
                 and coordinator.is_available
                 and not getattr(coordinator, "battery_manual_mode_enabled", False)
+                and _counts_towards_fleet_energy(self._controller, coordinator)
                 and not self._controller._non_responsive.is_excluded(coordinator)
                 and not self._controller._is_backup_function_active(coordinator)
                 and not coordinator.rs485_user_disabled
@@ -2864,8 +2883,9 @@ class PricingManager:
                 predischarge_reserve_soc=float(
                     getattr(self._controller, "predischarge_reserve_soc", 0.0)
                 ),
-                headroom_margin_kwh=float(
-                    getattr(self._controller, "_predictive_safety_margin_kwh", 0.0)
+                headroom_margin_pct=float(
+                    getattr(self._controller, "_predictive_safety_margin_pct", 0.0)
+                    or 0.0
                 ),
                 charge_power_w=float(getattr(self._controller, "max_charge_capacity", 0.0) or 0.0),
                 max_export_power_w=export_limit_w,
@@ -3184,7 +3204,9 @@ class PricingManager:
         capacity = getattr(controller, "_dp_eval_projection_capacity_kwh", 0.0) or 0.0
         coords = [
             c for c in controller.coordinators
-            if c.data and not getattr(c, "battery_manual_mode_enabled", False)
+            if c.data
+            and not getattr(c, "battery_manual_mode_enabled", False)
+            and _counts_towards_fleet_energy(controller, c)
         ]
         if ref is None or capacity <= 0 or not coords:
             self._set_curtailment_runtime("planned", "no_projection")
@@ -3588,14 +3610,6 @@ class PricingManager:
         except Exception:  # noqa: BLE001
             return False
 
-    def _discharge_reserve_holds(self) -> bool:
-        """Whether the discharge reserve keeps stored energy for dearer hours."""
-        manager = getattr(self._controller, "_discharge_reserve_mgr", None)
-        try:
-            return bool(manager is not None and manager.feature_enabled())
-        except Exception:  # noqa: BLE001
-            return False
-
     def _fleet_charge_power_kw(
         self,
         coordinators: Sequence[Any],
@@ -3722,7 +3736,9 @@ class PricingManager:
         owned = getattr(self._controller, "_is_battery_manual_owned", None)
         return [
             c for c in getattr(self._controller, "coordinators", None) or []
-            if c.data and not (callable(owned) and owned(c))
+            if c.data
+            and not (callable(owned) and owned(c))
+            and _counts_towards_fleet_energy(self._controller, c)
         ]
 
     def _net_scalar_grid_carried_load(
@@ -3843,14 +3859,26 @@ class PricingManager:
         controller._dp_plan_solar_delay = False
         controller._dp_plan_room = None
 
+    def _plan_reaches_past(self, when: datetime) -> bool:
+        """Whether the published optimizer plan decided for the time after
+        ``when``: its stored trajectory ends later."""
+        projection = getattr(self._controller, "_dp_eval_projection", None)
+        if not projection:
+            return False
+        end = projection[-1][0]
+        if not isinstance(end, datetime):
+            return False
+        if (end.tzinfo is None) != (when.tzinfo is None):
+            end = end.replace(tzinfo=when.tzinfo)
+        return end > when
+
     def _publish_plan_holds(self, plan, decision_data: Mapping[str, Any]) -> None:
-        """Step 5: with the Discharge Reserve on, the optimizer's holds replace
-        the reserve module's level. Kept apart from the schedule, which does not
-        exist when nothing is charged. None: the reserve module decides."""
+        """The optimizer's holds (#888), kept apart from the schedule, which
+        does not exist when nothing is charged. None: the previous allocator
+        planned, and nothing is held (D2)."""
         self._controller._dp_plan_holds = (
             frozenset(getattr(plan, "holds", None) or ())
             if decision_data.get("planner") == "optimizer"
-            and self._discharge_reserve_holds()
             else None
         )
         # Step 4: a pending weekly charge's holds, executed by the weekly
@@ -4034,7 +4062,7 @@ class PricingManager:
             safety = max(
                 0.0,
                 float(
-                    getattr(self._controller, "_predictive_safety_margin_kwh", 0.0)
+                    getattr(self._controller, "_predictive_safety_margin_pct", 0.0)
                     or 0.0
                 ),
             )
@@ -4094,7 +4122,7 @@ class PricingManager:
                 solar_start=solar_start_dt,
                 solar_end=solar_end_dt,
                 mode=solar_profile_mode,
-                safety_margin_kwh=safety,
+                safety_margin_pct=safety,
                 extended_timezone=(
                     solar_forecast_local_timezone(self._hass, self._controller, now)
                     if is_extended and solar_input.periods
@@ -4195,7 +4223,7 @@ class PricingManager:
                 0.0,
                 float(
                     getattr(
-                        self._controller, "_predictive_safety_margin_kwh", 0.0
+                        self._controller, "_predictive_safety_margin_pct", 0.0
                     )
                     or 0.0
                 ),
@@ -4224,7 +4252,7 @@ class PricingManager:
                 boundaries,
                 solar_input,
                 learned_snapshot,
-                safety_margin_kwh=safety,
+                safety_margin_pct=safety,
                 **solar_kwargs,
             )
             timeline = solar_result.timeline
@@ -4313,7 +4341,9 @@ class PricingManager:
 
             eligible = [
                 c for c in self._controller.coordinators
-                if c.data and not self._controller._is_battery_manual_owned(c)
+                if c.data
+                and not self._controller._is_battery_manual_owned(c)
+                and _counts_towards_fleet_energy(self._controller, c)
             ]
             # The batteries hand out at most their discharge power; the grid
             # carries the rest of the house load. Without this cap an 800 W
@@ -4344,7 +4374,7 @@ class PricingManager:
                     boundaries,
                     solar_input,
                     learned_snapshot,
-                    safety_margin_kwh=0.0,
+                    safety_margin_pct=0.0,
                     **solar_kwargs,
                 )
                 shown_solar = shown_result.intervals_kwh
@@ -4367,7 +4397,7 @@ class PricingManager:
 
             def floor_of(c) -> float:
                 if held_until is not None or not callable(planning_floor):
-                    return float(c.min_soc)
+                    return effective_min_soc(c)
                 return float(planning_floor(c))
 
             # 100% while a weekly full charge is pending, so the plan may size
@@ -4670,12 +4700,8 @@ class PricingManager:
                     import_value_margin=(
                         margin if value_deadlines else 0.0
                     ),
-                    reserve_holds=value_deadlines and self._discharge_reserve_holds(),
-                    # The optimizer holds instead of the reserve module (step 5).
-                    hold_allowed=value_deadlines and self._discharge_reserve_holds(),
-                    hold_min_saving=max(0.0, float(
-                        getattr(self._controller, "discharge_reserve_min_saving", 0.0) or 0.0
-                    )),
+                    # The optimizer holds whenever the plan costs less (#888).
+                    hold_allowed=value_deadlines,
                     # The optimizer chooses which surplus to export (step 6).
                     # Only with export prices: valued at 0 the plan never
                     # exports and the module (import curve) must keep deciding.
@@ -4770,6 +4796,13 @@ class PricingManager:
                     charging_now=bool(
                         getattr(self._controller, "_current_price_slot_active", False)
                         and getattr(self._controller, "grid_charging_active", False)
+                    ),
+                    # Likewise a battery the plan holds now (its hold start
+                    # cost): the last control cycle's block, since every
+                    # evaluation starts by dropping the plan's holds.
+                    holding_now=bool(
+                        (getattr(self._controller, "_plan_hold_status", None) or {})
+                        .get("held_batteries")
                     ),
                 )
             )
@@ -5273,7 +5306,6 @@ class PricingManager:
         # the absorption plan was derived from the inputs it is about to replace.
         self._clear_plan_orders()
         self._mark_surplus_hold_stale(f"dp_evaluation_{horizon.value}")
-        self._mark_discharge_reserve_stale(f"dp_evaluation_{horizon.value}")
 
         now = self._now()
         today = now.date()
@@ -6118,9 +6150,10 @@ class PricingManager:
         of them charge. A battery with a large gap keeps charging alone at its
         own limit after the others are full, and its last few percent charge
         slower (the 100 % voltage taper at 200 W, or the BMS derating near
-        full). A margin on top covers temperature derating and discharge
-        between slot blocks. Booking too much costs nothing: a slot is
-        cancelled before it starts once the battery is full.
+        full). A margin on top covers a battery that warms up into the
+        temperature limit and discharge between slot blocks. Booking too much
+        costs nothing: a slot is cancelled before it starts once the battery
+        is full.
         """
         contracted = self._contracted_charge_ceiling()
         hours = calculations.calculate_exact_charging_hours_needed(
@@ -6143,10 +6176,14 @@ class PricingManager:
     def _weekly_tails(self):
         """Per automatic battery still short of 100 %: (gap kWh, top-band kWh,
         charge W, top-band W). The last WEEKLY_CHARGE_TAIL_PCT charge at the
-        100 % voltage taper's power (200 W) or at half power (BMS derating)."""
+        100 % voltage taper's power (200 W) or at half power (BMS derating).
+        A battery under the temperature charge limit charges at what the limit
+        lets through now, as the controller commands it."""
         contracted = self._contracted_charge_ceiling()
         for coordinator in getattr(self._controller, "coordinators", ()) or ():
             if getattr(coordinator, "battery_manual_mode_enabled", False):
+                continue
+            if not _counts_towards_fleet_energy(self._controller, coordinator):
                 continue
             data = getattr(coordinator, "data", None) or {}
             try:
@@ -6157,7 +6194,7 @@ class PricingManager:
                     / 100.0
                     * capacity_kwh,
                 )
-                power_w = min(
+                rated_w = min(
                     contracted or math.inf,
                     float(
                         getattr(coordinator, "max_charge_power", None)
@@ -6165,6 +6202,7 @@ class PricingManager:
                         or 0.0
                     ),
                 )
+                power_w = self._temperature_limited_w(coordinator, rated_w)
             except (TypeError, ValueError):
                 continue
             if gap_kwh <= 0.0 or power_w <= 0.0:
@@ -6173,9 +6211,22 @@ class PricingManager:
             tail_power_w = (
                 min(power_w, NORMAL_BALANCE_CHARGE_POWER_W)
                 if getattr(coordinator, CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED, False)
-                else power_w * WEEKLY_CHARGE_TAIL_POWER_RATIO
+                else min(power_w, rated_w * WEEKLY_CHARGE_TAIL_POWER_RATIO)
             )
             yield gap_kwh, tail_kwh, power_w, tail_power_w
+
+    def _temperature_limited_w(self, coordinator, power_w: float) -> float:
+        """``power_w`` under the temperature charge limit at the battery's
+        temperature now; unchanged without the limit or a reading."""
+        apply = getattr(
+            getattr(self._controller, "_temp_limit_mgr", None), "apply_temperature_limit", None
+        )
+        if not callable(apply) or power_w <= 0.0 or not math.isfinite(power_w):
+            return power_w
+        try:
+            return min(power_w, float(apply(coordinator, int(round(power_w)))))
+        except (TypeError, ValueError, AttributeError):
+            return power_w
 
     def _weekly_full_by(self, now: datetime) -> datetime | None:
         """The weekly full charge's deadline (D-2): the window's end, or with
@@ -6413,7 +6464,9 @@ class PricingManager:
         return sum(
             float(c.data.get("battery_total_energy", 0) or 0)
             for c in self._controller.coordinators
-            if c.data and not getattr(c, "battery_manual_mode_enabled", False)
+            if c.data
+            and not getattr(c, "battery_manual_mode_enabled", False)
+            and _counts_towards_fleet_energy(self._controller, c)
         )
 
     def _store_eval_projection(self, plan: ChronologicalPlan | None) -> None:
@@ -6510,12 +6563,13 @@ class PricingManager:
         return True
 
     def _is_dp_soc_drop_reeval(self) -> bool:
-        """Return True when live SOC has fallen below what the plan projected.
+        """Return True when live SOC has left the line the plan projected.
 
         The chronological plan already projects the evening/night discharge, so
-        only a deviation below that line re-plans (a battery that reaches the
-        floor earlier than projected, or a projected charge that did not happen,
-        is one). Without a projection it falls back to the #411 rule: a drop of
+        only a deviation from that line re-plans: below it (a battery that
+        reaches the floor earlier than projected, or a projected charge that did
+        not happen) or above it (a lighter house than the profile). Without a
+        projection it falls back to the #411 rule, downward only: a drop of
         ``SOC_REEVALUATION_THRESHOLD`` (5 points with a chronological plan)
         below ``_dp_last_eval_soc``. ``None`` reference never triggers.
         """
@@ -6527,7 +6581,9 @@ class PricingManager:
             return False
         coords = [
             c for c in self._controller.coordinators
-            if c.data and not getattr(c, "battery_manual_mode_enabled", False)
+            if c.data
+            and not getattr(c, "battery_manual_mode_enabled", False)
+            and _counts_towards_fleet_energy(self._controller, c)
         ]
         if not coords:
             return False
@@ -6548,13 +6604,32 @@ class PricingManager:
             nxt = next((when for when, _v in projection if when >= now), None)
             end = quarter_end if nxt is None else min(nxt, quarter_end)
             at_point = next((value for when, value in projection if when == end), None)
-            projected = min(
-                projected,
+            capacity = self._controller._dp_eval_projection_capacity_kwh
+            at_end = (
                 self.projected_soc_now(end) if at_point is None
-                else self._controller._dp_last_eval_soc
-                + at_point / self._controller._dp_eval_projection_capacity_kwh * 100.0,
+                else ref + at_point / capacity * 100.0
             )
-            return projected - current >= SOC_DROP_BELOW_PROJECTION
+            if min(projected, at_end) - current >= SOC_DROP_BELOW_PROJECTION:
+                return True
+            # Above the line: the plan spends energy it does not know about
+            # (2026-11-20: it drew the battery empty at 15 % at 22:45 and left
+            # the rest to the grid). Only an optimizer plan, whose rows carry
+            # the sun its safety margin took off: a sunny day beats the
+            # margined line by design. Never mid-slot (a re-plan can cut a
+            # running charge), and one per plan hour so a battery that cannot
+            # follow the plan (held, excluded) re-plans at most hourly.
+            rows = getattr(self._controller, "_dp_eval_rows", None)
+            if (
+                not rows
+                or getattr(self._controller, "_current_price_slot_active", False)
+                or now - projection[0][0] < SOC_RISE_MIN_PLAN_AGE
+            ):
+                return False
+            # ponytail: plain mean SOC against a fleet-energy line, as the
+            # downward check; a mixed-size fleet can drift off it on its own.
+            margin_sun = sum(row[5] for row in rows if row[1] <= end)
+            high = max(projected, at_end) + margin_sun / capacity * 100.0
+            return current - high >= SOC_DROP_BELOW_PROJECTION
         schedule = getattr(self._controller, "_dynamic_pricing_schedule", None)
         threshold = (
             5.0
@@ -7106,14 +7181,6 @@ class PricingManager:
         decision = await controller._should_activate_grid_charging(
             consumption_override_kwh=remaining_consumption_kwh,
             solar_forecast_override_kwh=balance_solar_kwh,
-            # Today's sun and tomorrow's each give up the margin (per day).
-            **(
-                {"solar_days_kwh": (
-                    remaining_solar_kwh, balance_solar_kwh - remaining_solar_kwh
-                )}
-                if planning_extended
-                else {}
-            ),
         )
         # Keep explicit diagnostics for the pre-slot notification and future
         # consumers while preserving the legacy avg_consumption_kwh field.
@@ -7745,37 +7812,10 @@ class PricingManager:
             for coordinator in getattr(controller, "coordinators", []):
                 if getattr(coordinator, "battery_manual_mode_enabled", False):
                     continue
+                if not can_take_setpoint(coordinator):
+                    continue
                 await controller._set_battery_power(coordinator, 0, 0)
         _LOGGER.info("Dynamic pricing: stopped active slot (%s)", reason)
-
-    def _mark_discharge_reserve_stale(self, reason: str) -> None:
-        """Ask the discharge reserve to rebuild on the next control cycle."""
-        manager = getattr(self._controller, "_discharge_reserve_mgr", None)
-        if manager is not None:
-            manager.mark_stale(reason)
-
-    def _clear_discharge_reserve(self, reason: str) -> None:
-        """Drop any cached reserve plan so no discharge floor stays raised."""
-        manager = getattr(self._controller, "_discharge_reserve_mgr", None)
-        if manager is not None:
-            manager.clear(reason)
-
-    async def _refresh_discharge_reserve_plan(
-        self, reason: str, *, force: bool = False
-    ) -> None:
-        """Rebuild the reserve plan, tolerating a partial controller.
-
-        Test doubles and early startup may not carry the manager; no plan means
-        no reserve, which is the safe direction.
-        """
-        manager = getattr(self._controller, "_discharge_reserve_mgr", None)
-        if manager is None:
-            return
-        try:
-            await manager.async_rebuild_plan(reason, force=force)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Discharge reserve: rebuild failed (%s): %s", reason, err)
-            manager.clear("rebuild_error")
 
     def _mark_surplus_hold_stale(self, reason: str) -> None:
         """Ask the surplus-absorption plan to rebuild on the next control cycle."""
@@ -7879,7 +7919,17 @@ class PricingManager:
                 self._controller._dp_arbitrage_ceiling = None
                 self._controller._dp_evening_reevaluated_date = None
                 self._controller._dp_last_eval_soc = None
-                self._clear_plan_orders()
+                if self._plan_reaches_past(midnight):
+                    # The plan in force decided these hours too: its orders
+                    # stay until the day's own evaluation (00:05), which
+                    # starts by clearing them. Dropped here, the modules
+                    # decided for those minutes (2026-11-19: a battery the
+                    # plan held until 06:30 discharged from 00:00 to 00:05, in
+                    # the night's cheapest quarter). Only the overdue
+                    # trigger's reference goes, like the other triggers'.
+                    self._controller._dp_weekly_full_at = None
+                else:
+                    self._clear_plan_orders()
                 self._controller._dp_eval_projection = None
                 self._controller._dp_last_eval_excluded_claim_kwh = None
                 self._controller._dp_excluded_demand_reeval_at = None
@@ -7891,7 +7941,6 @@ class PricingManager:
                 self._reset_predictive_demand_runtime()
                 self.clear_curtailment_runtime("new_day")
                 self._clear_surplus_hold("new_day")
-                self._clear_discharge_reserve("new_day")
 
         # Phase 2: Retry if prices (or the solar forecast) weren't available at
         # 00:05. Every 15 min in the first hour, then every 30 min all day:
@@ -7916,13 +7965,13 @@ class PricingManager:
                 horizon=DynamicPricingEvaluationHorizon.REMAINING,
             )
 
-        # Phase 2.61: Re-plan when live SOC has fallen far below the level the
-        # last balance assumed (#411). A full remaining-horizon rebuild, not the
+        # Phase 2.61: Re-plan when live SOC has left the level the last balance
+        # assumed, below it (#411) or above it. A full remaining-horizon rebuild, not the
         # evening top-up: the rebuild can withdraw obsolete slots as well as add
         # deadline-aware energy, which avoids the stale-plan failure from #472.
         # The rebuild refreshes _dp_last_eval_soc itself.
         elif self._is_dp_soc_drop_reeval():
-            _LOGGER.info("Dynamic pricing: SOC fell below the evaluated level — re-evaluating")
+            _LOGGER.info("Dynamic pricing: SOC left the plan's projected line — re-evaluating")
             await self._evaluate_dynamic_pricing(
                 horizon=DynamicPricingEvaluationHorizon.REMAINING,
             )
@@ -8016,10 +8065,6 @@ class PricingManager:
         # throttles itself; between rebuilds it only refreshes the live target,
         # which is what lets an under-delivering cheap window release the hold.
         await self._refresh_surplus_hold_plan("control_cycle")
-
-        # Phase 3.6: keep the discharge reserve current. Same throttle, same
-        # failure direction: without a plan the discharge floor is untouched.
-        await self._refresh_discharge_reserve_plan("control_cycle")
 
         # Reaching the opportunistic target outside the control handler (for
         # example through solar or a manual charge) invalidates every remaining
@@ -8364,7 +8409,9 @@ class PricingManager:
                 now = self._now()
                 automatic = [
                     c for c in self._controller.coordinators
-                    if c.data and not getattr(c, "battery_manual_mode_enabled", False)
+                    if c.data
+                    and not getattr(c, "battery_manual_mode_enabled", False)
+                    and _counts_towards_fleet_energy(self._controller, c)
                 ]
                 avg_soc = (
                     sum(c.data.get("battery_soc", 0) or 0 for c in automatic)
@@ -8497,7 +8544,9 @@ class PricingManager:
 
             automatic = [
                 c for c in self._controller.coordinators
-                if c.data and not getattr(c, "battery_manual_mode_enabled", False)
+                if c.data
+                and not getattr(c, "battery_manual_mode_enabled", False)
+                and _counts_towards_fleet_energy(self._controller, c)
             ]
             current_avg_soc = (
                 sum(c.data.get("battery_soc", 0) for c in automatic)
@@ -9040,7 +9089,9 @@ class PricingManager:
             / 100.0
             * float(c.data.get("battery_total_energy", 0) or 0)
             for c in getattr(ctrl, "coordinators", ()) or ()
-            if c.data and not (callable(owned) and owned(c))
+            if c.data
+            and not (callable(owned) and owned(c))
+            and _counts_towards_fleet_energy(ctrl, c)
         )
 
     def apply_time_slot_floor_hold(self) -> None:

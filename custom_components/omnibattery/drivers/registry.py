@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from .anker import AnkerModbusDriver
 from .base import BatteryDriver, DriverTraits
 from .esphome import EsphomeEntityDriver
+from .generic_ha import GenericHaEntityDriver
 from .hoymiles import HoymilesMqttDriver
 from .huawei import HuaweiSolarDriver
 from .indevolt import IndevoltDriver
@@ -32,6 +33,7 @@ DRIVERS: dict[str, type[BatteryDriver]] = {
     "hoymiles": HoymilesMqttDriver,
     "huawei": HuaweiSolarDriver,
     "victron": VictronEssDriver,
+    "generic_ha": GenericHaEntityDriver,
 }
 DEFAULT_BRAND = "marstek"
 

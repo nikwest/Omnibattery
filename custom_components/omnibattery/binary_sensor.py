@@ -16,9 +16,11 @@ from .infra.clock import local_now
 from .const import (
     DOMAIN,
     CONF_CAPACITY_PROTECTION_ENABLED,
+    CONF_ENABLE_TEMP_CHARGE_LIMIT,
     CONF_ENABLE_PREDICTIVE_CHARGING,
     PREDICTIVE_MODE_DYNAMIC_PRICING,
 )
+from .drivers.base import can_take_setpoint
 from .energy import effective_round_trip_efficiency
 from .infra.coordinator import MarstekVenusDataUpdateCoordinator
 from .infra.entity_naming import english_entity_id, system_entity_id, SYSTEM_UNIQUE_ID_PREFIX
@@ -42,8 +44,11 @@ async def async_setup_entry(
         for definition in coordinator.binary_sensor_definitions:
             entities.append(MarstekVenusBinarySensor(coordinator, definition))
 
-        # Add charge hysteresis sensor for batteries with hysteresis enabled
-        if coordinator.enable_charge_hysteresis:
+        # Add charge hysteresis sensor for batteries with hysteresis enabled.
+        # Hysteresis holds a battery off charging after it reaches max SOC, so it
+        # describes a charge command. A battery that receives none has no
+        # hysteresis to report, whatever the stored flag says.
+        if coordinator.enable_charge_hysteresis and can_take_setpoint(coordinator):
             entities.append(ChargeHysteresisActiveSensor(coordinator))
 
     # Keep predictive diagnostics registered while the master switch is off so
@@ -58,6 +63,10 @@ async def async_setup_entry(
     # Add capacity protection status sensor (system-level, when configured, regardless of enabled state)
     if controller and CONF_CAPACITY_PROTECTION_ENABLED in entry.data:
         entities.append(CapacityProtectionStatusSensor(hass, entry, controller))
+
+    # Temperature charge limit status, under the same condition as its switch
+    if controller and CONF_ENABLE_TEMP_CHARGE_LIMIT in entry.data:
+        entities.append(TemperatureChargeLimitStatusSensor(hass, entry, controller))
 
     async_add_entities(entities)
 
@@ -306,14 +315,13 @@ class SurplusPriceHoldSensor(BinarySensorEntity):
 
 
 class DischargeReserveSensor(BinarySensorEntity):
-    """Diagnostic state for the price-aware discharge reserve.
+    """Diagnostic state of the plan's holds (#888).
 
-    ``on`` means part of the stored energy is being kept back because a dearer
-    hour is still ahead today. The reserve itself is published as
-    ``reserve_soc_pct``: everything above it stays available right now.
+    ``on`` while the Dynamic Pricing plan holds a battery in this slot, so the
+    grid carries the house and the stored energy is kept for a dearer hour.
+    The attributes give the held slot, where the run of held slots ends, and
+    the guard that released a hold, if any.
     """
-
-    _unrecorded_attributes = frozenset({"reserved_slots", "claims"})
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
         self.hass = hass
@@ -329,28 +337,93 @@ class DischargeReserveSensor(BinarySensorEntity):
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def _status(self) -> dict:
-        manager = getattr(self.controller, "_discharge_reserve_mgr", None)
+        return dict(getattr(self.controller, "_plan_hold_status", None) or {})
+
+    @property
+    def is_on(self) -> bool:
+        """The plan holds a battery now (a ``price_reserve`` block, #888)."""
+        return bool(self._status().get("held_batteries"))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self._status()
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, "marstek_venus_system")},
+            "name": "Omnibattery System",
+            "manufacturer": "Omnibattery",
+            "model": "Multi-Battery System",
+        }
+
+
+class TemperatureChargeLimitStatusSensor(BinarySensorEntity):
+    """On while a battery's charge power is derated by its temperature.
+
+    The derate itself (``TemperatureChargeLimitManager``) only showed as an
+    attribute of the integration status, and only while the feature was on.
+    Per battery: the power it may take as a percentage of normal
+    (``derate_pct``), its temperature and the limit and band; plus the
+    hottest battery. An unknown temperature never derates (fail-safe), so it
+    reads as not derated here too.
+    """
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.controller = controller
+        self._attr_has_entity_name = True
+        self._attr_translation_key = "temperature_charge_limit_status"
+        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}temperature_charge_limit_status"
+        self.entity_id = system_entity_id("binary_sensor", "temperature_charge_limit_status")
+        self._attr_device_class = "running"
+        self._attr_icon = "mdi:thermometer-alert"
+        self._attr_should_poll = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _status(self) -> dict:
+        manager = getattr(self.controller, "_temp_limit_mgr", None)
         return manager.get_status() if manager is not None else {}
 
     @property
     def is_on(self) -> bool:
-        try:
-            return float(self._status().get("reserve_soc_pct", 0.0) or 0.0) > 0.0
-        except (TypeError, ValueError):
-            return False
+        return any(battery.get("derating") for battery in self._status().values())
 
     @property
     def extra_state_attributes(self) -> dict:
-        attrs = {
-            "enabled": bool(
-                getattr(self.controller, "discharge_reserve_enabled", False)
-            ),
-            "min_saving": getattr(
-                self.controller, "discharge_reserve_min_saving", None
-            ),
+        status = self._status()
+        enabled = bool(getattr(self.controller, "temp_charge_limit_enabled", False))
+        batteries = {}
+        hottest, hottest_temp = None, None
+        for name, battery in status.items():
+            try:
+                temp = float(battery.get("internal_temperature"))
+            except (TypeError, ValueError):
+                temp = None
+            batteries[name] = {
+                # 100 unless the limit is really applied (feature off → no derate).
+                "derate_pct": (
+                    round(float(battery.get("derate_factor", 1.0)) * 100.0, 1)
+                    if battery.get("derating")
+                    else 100.0
+                ),
+                "internal_temperature": temp,
+                "derating": bool(battery.get("derating")),
+            }
+            if temp is not None and (hottest_temp is None or temp > hottest_temp):
+                hottest, hottest_temp = name, temp
+        first = next(iter(status.values()), {})
+        return {
+            "enabled": enabled,
+            "limit_c": first.get("limit_c"),
+            "band_c": first.get("band_c"),
+            "floor_pct": first.get("floor_pct"),
+            "discharge_derated_too": bool(first.get("apply_discharge")),
+            "hottest_battery": hottest,
+            "hottest_temperature": hottest_temp,
+            "batteries": batteries,
         }
-        attrs.update(self._status())
-        return attrs
 
     @property
     def device_info(self):

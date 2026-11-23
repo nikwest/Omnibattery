@@ -55,8 +55,10 @@ Estas entidades pertenecen a **Omnibattery System**, no a una batería.
     | `predictive_charging_active` | Se ha configurado carga predictiva |
     | `curtailment_status`, `surplus_price_hold_status`, `discharge_reserve_status`, `high_price_discharge_status` | Función de Precio dinámico pertinente disponible |
     | `capacity_protection_active` | Protección de capacidad configurada |
+    | `temperature_charge_limit_status` (sensor binario) | Límite de carga por temperatura configurado |
     | `weekly_full_charge` | Carga completa semanal activada |
     | `charge_delay_status` | Retraso de carga configurado |
+    | `excluded_device_status_<n>` | Uno por dispositivo excluido configurado |
     | `system_alarm_status` | Al menos una batería expone registros de alarma |
 
 ??? "Números del sistema"
@@ -69,8 +71,8 @@ Estas entidades pertenecen a **Omnibattery System**, no a una batería.
     - Protección de capacidad: `capacity_protection_soc_threshold`
     - Retraso de carga: `delay_safety_margin_min`, `charge_delay_balance_deadband_kwh`, `delay_soc_setpoint`
     - Temperatura: `temp_charge_limit_c`, `temp_charge_limit_band_c`, `temp_charge_limit_floor_pct`
-    - Carga predictiva: `predictive_safety_margin_kwh`, `predictive_min_soc_floor`
-    - Precio dinámico: `max_price_threshold`, `discharge_price_threshold`, `min_arbitrage_margin`, `round_trip_efficiency`, `negative_injection_threshold`, `predischarge_reserve_soc`, `surplus_hold_min_saving`, `discharge_reserve_min_saving`
+    - Carga predictiva: `predictive_safety_margin_pct`, `predictive_min_soc_floor`
+    - Precio dinámico: `max_price_threshold`, `discharge_price_threshold`, `min_arbitrage_margin`, `round_trip_efficiency`, `negative_injection_threshold`, `predischarge_reserve_soc`, `surplus_hold_min_saving`
     - Balance neto horario: `hourly_balance_target_net_wh`, `hourly_balance_max_offset_w`, `hourly_balance_deadband_wh`, `hourly_balance_hysteresis_w`
     - Carga excluida: `excluded_device_exclusion_pct`, uno por cada dispositivo compatible configurado
 
@@ -78,7 +80,7 @@ Estas entidades pertenecen a **Omnibattery System**, no a una batería.
 
     - Opciones de controlador siempre disponibles: `manual_mode`, `no_pd_mode`, `three_phase_protection`, `weekly_full_charge_enabled`, `vacation_mode`, `grid_import_window_15min` (Ventana de 15 min de Importación de Red, ver [Peak shaving](../features/peak-shaving.es.md#ventana-de-15-minutos))
     - Funciones condicionales: `offgrid_mode`, `primary_feedforward`, `system_power_limits`, `predictive_charging`, `predictive_charging_notifications`, `min_soc_floor_enabled`, `charge_delay`, `delay_soc_setpoint_enabled`, `weekly_full_charge_delay`, `temp_charge_limit`, `temp_charge_limit_discharge`, `capacity_protection`, `capacity_protection_excluded_devices`, `hourly_balance`
-    - Controles de precios: `price_discharge_control`, `smart_predischarge`, `negative_price_charging`, `surplus_price_hold`, `discharge_reserve`
+    - Controles de precios: `price_discharge_control`, `smart_predischarge`, `negative_price_charging`, `surplus_price_hold`
     - Controles generados: `time_slot` para cada franja horaria configurada; `excluded_device_enabled`, `excluded_device_solar_surplus`, `excluded_device_dynamic_power_control` y `excluded_device_cover_home` para cada dispositivo excluido aplicable
     - Compatibilidad con automatización externa: `automation_charging_active`
 
@@ -144,6 +146,7 @@ Las entidades de batería dependen del controlador. Una entidad ausente normalme
     | Interruptor | `full_charge_voltage_taper` | Telemetría de celdas compatible |
     | Interruptor | `backup_function`, `rs485_control_mode`, `lamp_switch` | El controlador expone el control |
     | Selector | `force_mode`, `grid_off_mode`, `user_work_mode` | El controlador expone el control |
+    | Selector | `autonomous_operating_mode` (`nom`, `manual`) | Batería leída mediante entidades de Home Assistant con entidad de modo de operación. El estado es lo que has pedido; `effective_mode`, `status`, `suspended`, `suspension_causes`, `last_change`, `last_error` y `failed_attempts` son atributos |
     | Botón | `reset_device` | El controlador expone la orden |
 
 ## Atributos de estado y diagnóstico
@@ -177,7 +180,7 @@ Las entidades de batería dependen del controlador. Una entidad ausente normalme
 
     | Atributo | Significado |
     |---|---|
-    | `trigger_1_budget_kwh` | Energía de batería que **Venta a precio alto** (*Solo excedente* o superior) puede vender tras reservar la necesidad prevista hasta el amanecer y el margen de seguridad |
+    | `trigger_1_budget_kwh` | Energía de batería que **Venta a precio alto** (*Solo excedente* o superior) puede vender tras reservar la necesidad prevista hasta el amanecer (con la solar menos el margen de seguridad) |
     | `refill_price` | Precio de exportación de referencia para que la solar rellene la batería mañana |
     | `trigger_1_reason` | Por qué la exportación de excedente está activa o inactiva |
     | `surplus_export_enabled` | Si **Venta a precio alto** está en *Solo excedente* o superior |
