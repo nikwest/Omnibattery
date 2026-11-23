@@ -334,6 +334,15 @@ class VictronEssDriver(BatteryDriver):
         requested = set(keys) if keys is not None else None
         snapshot: TelemetrySnapshot = {}
 
+        if not self._gx.connected and not self._shutting_down:
+            # The client drops its socket when a request times out (a late
+            # reply would answer the next one). Reopen it now instead of
+            # waiting for the coordinator's reconnect after three failed
+            # polls: one timeout should cost one poll. connect() starts every
+            # service untrusted, so nothing is believed before its witness.
+            if not await self.connect():
+                return snapshot
+
         if requested is None or {"battery_soc", "battery_power", "battery_voltage"} & requested:
             values = await self._gx.read(gx.SYSTEM, [
                 gx.SYSTEM_BATTERY_VOLTAGE, gx.SYSTEM_BATTERY_POWER, gx.SYSTEM_BATTERY_SOC,
