@@ -1,6 +1,23 @@
 # Changelog
 
-## [Unreleased]
+## [2.0.0b2] - Unreleased
+
+### Changed
+
+- **Zendure AC models go to full standby after 15 minutes idle** (#633), as the Gielz zenSDK package does to cut the inverter's idle draw; the next charge or discharge wakes it. Thanks to @kastanjepoffer.
+
+### Fixed
+
+- **Predictive charging plans at the batteries' full charge power**: a battery that was warm or near full when the plan was made no longer lowers the charge power planned for later slots.
+- **Guaranteed Minimum SOC is kept on high-consumption days** (#834): a battery below it no longer loses it in the evening plan.
+- **Time Slot holds the energy for after the window from the moment it opens** (#938); **Integration Status** shows *Holding Energy for After the Cheap Slot* instead of *Balanced*.
+- **Daily operation chart: a past quarter with no measurement no longer shows the plan** (#853). Thanks to @Sjoedzj.
+- **Zendure 4000 Mix Pro MPPT inputs count as solar** (#942): system solar power and daily solar energy now include them, and the solar profile starts learning again. If your Solar Production sensor already includes them, take them out of it. Thanks to @xzaz.
+- **Discharge Reserve Status shows the holds still ahead again**: new `upcoming_holds` attribute with the start and end of each planned hold, as the daily chart draws them.
+- **High-Price Sale (*Surplus only*) sells part of the surplus** (#943): when tomorrow's sun cannot refill all of it, it sells the largest part the sun can refill instead of nothing. Thanks to @TvdBrink.
+- **Anker: the app's backup reserve is a discharge floor** (#939): Omnibattery stops discharging there instead of excluding the battery as not delivering. New **Backup Power SOC** diagnostic sensor. Thanks to @Rene-63.
+
+## [2.0.0b1] - 2026-11-23
 
 > [!WARNING]
 > **Read before upgrading: you may have to change things**

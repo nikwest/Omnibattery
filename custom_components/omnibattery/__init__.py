@@ -967,6 +967,9 @@ class ChargeDischargeController:
         # Calculate dynamic anti-windup limits based on total system capacity
         self.max_charge_capacity = self._effective_system_capacity(coordinators, is_charging=True)
         self.max_discharge_capacity = self._effective_system_capacity(coordinators, is_charging=False)
+        self.planning_charge_capacity = self._effective_system_capacity(
+            coordinators, is_charging=True, planning=True
+        )
 
         # Load sharing state: track which batteries were active last cycle.
         # Active-battery lists stay here (sensor.py/switch.py and the control loop
@@ -2248,7 +2251,12 @@ class ChargeDischargeController:
                                 getattr(self, "max_contracted_power", 0.0), 0.0
                             ),
                             self._daily_operation_float(
-                                getattr(self, "max_charge_capacity", 0.0), 0.0
+                                getattr(
+                                    self,
+                                    "planning_charge_capacity",
+                                    getattr(self, "max_charge_capacity", 0.0),
+                                ),
+                                0.0,
                             ),
                         )
                         / 1000.0
@@ -2807,14 +2815,26 @@ class ChargeDischargeController:
             limit = 0
         return max(0, limit)
 
-    def _effective_system_capacity(self, batteries: list, is_charging: bool) -> int:
-        """Return available capacity after applying the optional global cap."""
+    def _effective_system_capacity(
+        self, batteries: list, is_charging: bool, *, planning: bool = False
+    ) -> int:
+        """Return available capacity after applying the optional global cap.
+
+        ``planning`` sums each battery's configured ceiling instead of this
+        cycle's limit: temperature derate, top-of-charge taper, driver
+        telemetry and the active slot's ceiling describe now, not the slot a
+        planner books for later. A battery that takes no setpoint (observed)
+        cannot carry a booked charge, so it is left out.
+        """
         batteries = [
             coordinator for coordinator in batteries
             if not getattr(coordinator, CONF_BATTERY_MANUAL_MODE_ENABLED, False)
+            and not (planning and is_observed(coordinator))
         ]
         total_capacity = sum(
-            self._battery_power_limit(c, is_charging)
+            getattr(c, "effective_max_charge_power", c.max_charge_power)
+            if planning
+            else self._battery_power_limit(c, is_charging)
             for c in batteries
         )
         system_limit = self._configured_system_limit(is_charging)
@@ -3080,6 +3100,11 @@ class ChargeDischargeController:
         self.max_discharge_capacity = self._effective_system_capacity(
             self.coordinators,
             is_charging=False,
+        )
+        self.planning_charge_capacity = self._effective_system_capacity(
+            self.coordinators,
+            is_charging=True,
+            planning=True,
         )
 
     def _clamp_to_system_capacity(self, power: float, batteries: list, is_charging: bool) -> float:
@@ -4528,11 +4553,12 @@ class ChargeDischargeController:
         guard = getattr(manager, "_release_guard", None)
         released = guard() if callable(guard) else None
         # No holds (the previous allocator planned, D2) or another mode: none.
-        slot = (
-            next((s for s in holds if s.start <= now < s.end), None)
+        planned = (
+            holds
             if holds is not None and manager is not None and manager.dynamic_pricing_active()
-            else None
+            else ()
         )
+        slot = next((s for s in planned if s.start <= now < s.end), None)
         held = slot is not None and released is None
         slot_owned = getattr(self, "_is_manual_slot_owned", None)
         blocked = []
@@ -4558,11 +4584,24 @@ class ChargeDischargeController:
         starts = {s.start: s for s in holds or ()}
         while until in starts:
             until = starts[until].end
+        # Every run of held slots not yet over, as the daily chart draws them
+        # (the old reserve's reserved_slots showed the future too).
+        runs = []
+        for s in sorted(planned, key=lambda s: s.start):
+            if s.end <= now:
+                continue
+            if runs and runs[-1][1] == s.start:
+                runs[-1][1] = s.end
+            else:
+                runs.append([s.start, s.end])
         self._plan_hold_status = {
             "held_batteries": blocked,
             "held_slot": slot.start.isoformat() if slot is not None else None,
             "held_until": until.isoformat() if until is not None else None,
             "release_reason": released if slot is not None else None,
+            "upcoming_holds": [
+                {"start": start.isoformat(), "end": end.isoformat()} for start, end in runs
+            ],
         }
 
     def _refresh_ev_blocks(self) -> None:
