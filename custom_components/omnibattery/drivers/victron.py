@@ -38,6 +38,7 @@ from typing import Optional
 from .victron_client import VictronModbusClient
 from . import victron_transport as gx
 from .base import (
+    DELIVERED_AC_POWER_KEY,
     BatteryDriver,
     DriverCapabilities,
     DriverContext,
@@ -128,6 +129,13 @@ SENSOR_DEFINITIONS: list[dict] = [
     {"key": "ac_out_load", "name": "AC Output Power", "unit": "W",
      "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
      "category": "diagnostic", "scan_interval": "high", "enabled_by_default": True},
+    # AC-in minus AC-out: what the Multi takes from (+) or puts on (-) the AC
+    # bus for the battery, losses included. The controller prefers it to the
+    # DC battery_power, which reads a discharge at small charge setpoints
+    # because the Multi runs itself off the battery.
+    {"key": DELIVERED_AC_POWER_KEY, "name": "AC Delivered Power", "unit": "W",
+     "device_class": "power", "state_class": "measurement", "scale": 1, "precision": 0,
+     "scan_interval": "high", "enabled_by_default": True},
     {"key": "ess_control_mode", "name": "ESS Control Mode", "data_type": "char",
      "icon": "mdi:state-machine", "category": "diagnostic", "scan_interval": "low",
      "enabled_by_default": True},
@@ -270,7 +278,10 @@ class VictronEssDriver(BatteryDriver):
         )
         self._read_groups = [
             # ac_out_load is fast, not "low": every setpoint is derived from it.
-            ReadGroup("high", ("battery_soc", "battery_power", "battery_voltage", "ac_out_load")),
+            ReadGroup("high", (
+                "battery_soc", "battery_power", "battery_voltage", "ac_out_load",
+                DELIVERED_AC_POWER_KEY,
+            )),
             ReadGroup("low", ("ac_power_setpoint", "disable_charge", "disable_feedin", "ess_control_mode")),
         ]
 
@@ -380,15 +391,25 @@ class VictronEssDriver(BatteryDriver):
                     self._last_valid_soc = soc
                     self._last_valid_soc_monotonic = asyncio.get_running_loop().time()
 
-        if requested is None or "ac_out_load" in requested:
-            # With the Multi's own DC voltage, which vouches for the figure
+        if requested is None or {"ac_out_load", DELIVERED_AC_POWER_KEY} & requested:
+            # With the Multi's own DC voltage, which vouches for both figures
             # (see the GX-validity gate).
-            values = await self._gx.read(gx.VEBUS, [gx.VEBUS_AC_OUT_L1_POWER, gx.VEBUS_DC_VOLTAGE])
-            if (
-                values is not None
-                and self._check_service(_VEBUS_SERVICE, values[gx.VEBUS_DC_VOLTAGE])
-                and values[gx.VEBUS_AC_OUT_L1_POWER] is not None
-            ):
+            values = await self._gx.read(gx.VEBUS, [
+                gx.VEBUS_AC_IN_L1_POWER, gx.VEBUS_AC_OUT_L1_POWER, gx.VEBUS_DC_VOLTAGE,
+            ])
+            trusted = values is not None and self._check_service(
+                _VEBUS_SERVICE, values[gx.VEBUS_DC_VOLTAGE]
+            )
+            if values is not None:
+                # Published as None, not left out, whenever it cannot be
+                # computed: the controller prefers this key to battery_power,
+                # so a stale value would keep steering it.
+                ac_in = values[gx.VEBUS_AC_IN_L1_POWER] if trusted else None
+                ac_out = values[gx.VEBUS_AC_OUT_L1_POWER] if trusted else None
+                snapshot[DELIVERED_AC_POWER_KEY] = (
+                    int(ac_in - ac_out) if ac_in is not None and ac_out is not None else None
+                )
+            if trusted and values[gx.VEBUS_AC_OUT_L1_POWER] is not None:
                 load = int(values[gx.VEBUS_AC_OUT_L1_POWER])
                 self._ac_out_load_w = load
                 self._ac_out_load_monotonic = asyncio.get_running_loop().time()
@@ -427,12 +448,12 @@ class VictronEssDriver(BatteryDriver):
             # Same failed-read rule as ac_out_load above. An unknown mode is
             # not a confirmation either way: it expires like a failed read.
 
-        if snapshot:
+        if any(value is not None for value in snapshot.values()):
             # The two switches show what the user asked for, which the driver
             # holds itself: report it with every successful read, so a toggle
             # shows on the next (2 s) poll instead of the next 37-39 readback
-            # (30 s). Never on an empty snapshot — that is how a failed read
-            # reaches the coordinator.
+            # (30 s). Never on a snapshot with no reading in it — that is how
+            # a failed read reaches the coordinator.
             snapshot.update({k: int(v) for k, v in self._user_disable.items()})
         return snapshot
 
@@ -470,7 +491,7 @@ class VictronEssDriver(BatteryDriver):
     def control_dependency_keys(self) -> frozenset:
         return frozenset({
             "battery_soc", "battery_power", "ac_power_setpoint",
-            "ac_out_load", "ess_control_mode",
+            "ac_out_load", "ess_control_mode", DELIVERED_AC_POWER_KEY,
         })
 
     # --- control (write) ----------------------------------------------------

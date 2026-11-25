@@ -49,6 +49,7 @@ SYSTEM_SERIAL = "/Serial"
 SYSTEM_BATTERY_VOLTAGE = "/Dc/Battery/Voltage"
 SYSTEM_BATTERY_POWER = "/Dc/Battery/Power"
 SYSTEM_BATTERY_SOC = "/Dc/Battery/Soc"
+VEBUS_AC_IN_L1_POWER = "/Ac/ActiveIn/L1/P"
 VEBUS_AC_OUT_L1_POWER = "/Ac/Out/L1/P"
 VEBUS_DC_VOLTAGE = "/Dc/0/Voltage"
 VEBUS_AC_POWER_SETPOINT_L1 = "/Hub4/L1/AcPowerSetpoint"
@@ -119,8 +120,10 @@ _REGISTERS: dict[str, dict[str, _Register]] = {
         SYSTEM_BATTERY_SOC: _Register(843, "u16"),      # %
     },
     VEBUS: {
-        # 23-26 are contiguous (24/25 are L2/L3 power): one read, so the DC
-        # voltage that vouches for the AC-out figure comes with it.
+        # 12-26 are contiguous (AC-in and AC-out voltage, current, frequency
+        # and L2/L3 power between them): one read, so the DC voltage that
+        # vouches for both AC figures comes with them.
+        VEBUS_AC_IN_L1_POWER: _Register(12, "i16", scale=10),   # 10 W per count, +import
         VEBUS_AC_OUT_L1_POWER: _Register(23, "i16", scale=10),  # 10 W per count
         VEBUS_DC_VOLTAGE: _Register(26, "u16", scale=0.01),
         # 37-39 are contiguous. They are marked write-only in attributes.csv;
