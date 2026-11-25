@@ -202,6 +202,19 @@ async def test_modbus_refuses_to_write_registers_that_are_not_neighbours():
 # The driver on a transport that is not Modbus
 # ----------------------------------------------------------------------
 
+@pytest.mark.asyncio
+async def test_modbus_reads_ac_in_and_ac_out_as_one_block():
+    transport, fake = _modbus({227: {12: encode_i16(19), 23: encode_i16(15), 26: 5318}})
+
+    values = await transport.read(gx.VEBUS, [
+        gx.VEBUS_AC_IN_L1_POWER, gx.VEBUS_AC_OUT_L1_POWER, gx.VEBUS_DC_VOLTAGE,
+    ])
+
+    assert values[gx.VEBUS_AC_IN_L1_POWER] == 190
+    assert values[gx.VEBUS_AC_OUT_L1_POWER] == 150
+    assert fake.reads == [(227, 12, 15)]   # 12-26 in one request
+
+
 class _PathTransport:
     """A transport in plain D-Bus terms, the way MQTT presents a GX device:
     every value addressed by service + path, and an invalid one already None
@@ -217,6 +230,7 @@ class _PathTransport:
                 gx.SYSTEM_BATTERY_SOC: 67.5,
             },
             gx.VEBUS: {
+                gx.VEBUS_AC_IN_L1_POWER: 430,
                 gx.VEBUS_AC_OUT_L1_POWER: 430,
                 gx.VEBUS_DC_VOLTAGE: 53.18,
                 gx.VEBUS_AC_POWER_SETPOINT_L1: 0,
@@ -315,3 +329,16 @@ async def test_driver_on_a_path_transport_holds_the_target_on_ac_out_changes():
     await driver.read_telemetry(["ac_out_load"])
 
     assert transport.writes == [(gx.VEBUS, {gx.VEBUS_AC_POWER_SETPOINT_L1: 2000})]
+
+
+@pytest.mark.asyncio
+async def test_driver_on_a_path_transport_reports_unknown_ac_in_as_none():
+    transport = _PathTransport()
+    driver = _driver_on(transport)
+    await driver.connect()
+    transport.values[gx.VEBUS][gx.VEBUS_AC_IN_L1_POWER] = None
+
+    data = await driver.read_telemetry(["ac_out_load", "ac_delivered_power"])
+
+    assert data["ac_out_load"] == 430
+    assert data["ac_delivered_power"] is None

@@ -160,7 +160,7 @@ EXPECTED_CRITICAL = {
         ["battery_power", "battery_soc", "force_mode", "inverter_state",
          "set_charge_power", "set_discharge_power"], [19, 6]),
     "hoymiles": (["battery_power", "battery_soc", "inverter_state"], [16]),
-    "victron": (["battery_power", "battery_soc"], [4]),
+    "victron": (["battery_power", "battery_soc"], [5]),
 }
 
 

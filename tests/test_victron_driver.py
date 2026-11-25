@@ -35,7 +35,8 @@ from custom_components.omnibattery.drivers.victron_client import (
 # here on purpose, independent of the transport's own table, so a typo in
 # either one fails these tests (attributes.csv from victronenergy/
 # dbus_modbustcp).
-_REG_VEBUS_AC_OUT_L1_POWER = 23
+# AC-in power (12) through the Multi's DC voltage (26): read as one block.
+_REG_VEBUS_AC_BLOCK = 12
 _REG_VEBUS_AC_POWER_SETPOINT_L1 = 37
 _REG_VEBUS_DISABLE_CHARGE = 38
 _REG_SYSTEM_SERIAL = 800
@@ -56,11 +57,16 @@ def _fake_client():
     return client
 
 
-def _ac_out_block(power_word, dc_voltage_raw=4850):
-    """The vebus 23-26 block: AC-out power(23), L2/L3 power, and the Multi's
-    DC voltage(26, scale 100) that vouches for it — 48.50 V by default, 0
-    for the GX's invalid-value placeholder."""
-    return [power_word, 0, 0, dc_voltage_raw]
+def _ac_out_block(power_word, dc_voltage_raw=4850, ac_in_word=None):
+    """The vebus 12-26 block: AC-in power(12), AC-out power(23), and the
+    Multi's DC voltage(26, scale 100) that vouches for both — 48.50 V by
+    default, 0 for the GX's invalid-value placeholder. Both powers are 10 W
+    per count. AC-in defaults to AC-out (nothing to or from the battery)."""
+    block = [0] * 15
+    block[0] = power_word if ac_in_word is None else ac_in_word
+    block[11] = power_word
+    block[14] = dc_voltage_raw
+    return block
 
 
 def _every_read_answers(word):
@@ -313,7 +319,7 @@ def _gx_client(battery_block=None, ac_out_block=None, setpoint_block=None):
     async def fake_read(unit_id, start, count):
         if (unit_id, start) == (100, _REG_SYSTEM_BATTERY_VOLTAGE):
             return battery_block[:count] if battery_block is not None else None
-        if (unit_id, start) == (227, _REG_VEBUS_AC_OUT_L1_POWER):
+        if (unit_id, start) == (227, _REG_VEBUS_AC_BLOCK):
             return ac_out_block
         if (unit_id, start) == (227, _REG_VEBUS_AC_POWER_SETPOINT_L1):
             return setpoint_block[:count] if setpoint_block is not None else None
@@ -468,7 +474,7 @@ async def test_read_telemetry_tracks_ac_out_power_for_the_compensation(raw, expe
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            _ac_out_block(raw) if (unit_id, start) == (227, _REG_VEBUS_AC_OUT_L1_POWER) else None
+            _ac_out_block(raw) if (unit_id, start) == (227, _REG_VEBUS_AC_BLOCK) else None
         )
     )
     driver = _driver(client=client, consumption=None)
@@ -634,7 +640,7 @@ async def test_read_telemetry_refreshes_the_freshness_timestamps():
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            _ac_out_block(180) if start == _REG_VEBUS_AC_OUT_L1_POWER
+            _ac_out_block(180) if start == _REG_VEBUS_AC_BLOCK
             else [_HUB4_MODE_EXTERNAL_CONTROL] if start == _REG_SETTINGS_HUB4_MODE
             else None
         )
@@ -751,7 +757,7 @@ def _ac_out_client(raw_ac_out):
     client = _fake_client()
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
-            _ac_out_block(encode_i16(raw_ac_out)) if start == _REG_VEBUS_AC_OUT_L1_POWER else None
+            _ac_out_block(encode_i16(raw_ac_out)) if start == _REG_VEBUS_AC_BLOCK else None
         )
     )
     return client
@@ -926,7 +932,7 @@ async def test_idle_lock_is_reasserted_when_the_readback_disagrees():
     client.async_read_holding_block = AsyncMock(
         side_effect=lambda unit_id, start, count: (
             [encode_i16(400), 1, 0] if start == _REG_VEBUS_AC_POWER_SETPOINT_L1  # mixed pair
-            else _ac_out_block(40) if start == _REG_VEBUS_AC_OUT_L1_POWER
+            else _ac_out_block(40) if start == _REG_VEBUS_AC_BLOCK
             else None
         )
     )
@@ -1294,3 +1300,68 @@ async def test_no_reopen_while_shutting_down():
 
     await driver.read_telemetry()
     client.async_connect.assert_not_awaited()
+
+
+# ----------------------------------------------------------------------
+# AC delivered power (AC-in minus AC-out)
+# ----------------------------------------------------------------------
+
+
+def _vebus_reads(block):
+    return AsyncMock(
+        side_effect=lambda unit_id, start, count: (
+            block if (unit_id, start) == (227, _REG_VEBUS_AC_BLOCK) else None
+        )
+    )
+
+
+@pytest.mark.parametrize("ac_in_raw, ac_out_raw, expected", [
+    (19, 15, 40),                        # charging 40 W, 150 W of AC-out loads
+    (encode_i16(-60), 10, -700),         # exporting 600 W while AC-out draws 100 W
+    (3, 3, 0),                           # pass-through only
+])
+async def test_ac_delivered_power_is_ac_in_minus_ac_out(ac_in_raw, ac_out_raw, expected):
+    client = _fake_client()
+    client.async_read_holding_block = _vebus_reads(
+        _ac_out_block(encode_i16(ac_out_raw) if ac_out_raw >= 0 else ac_out_raw,
+                      ac_in_word=ac_in_raw)
+    )
+    driver = _driver(client)
+
+    data = await driver.read_telemetry(["ac_delivered_power"])
+
+    assert data["ac_delivered_power"] == expected
+
+
+async def test_the_controller_steers_on_ac_delivered_power_not_the_dc_side():
+    """The 2.0.0b2 report: a 35 W charge read as a ~55 W discharge on the DC
+    side (the Multi runs itself off the battery). The AC figure wins."""
+    client = _fake_client()
+    client.async_read_holding_block = _vebus_reads(_ac_out_block(0, ac_in_word=4))
+    driver = _driver(client)
+
+    data = await driver.read_telemetry(["ac_delivered_power"])
+
+    assert driver.ac_contribution_w({"battery_power": -55, **data}) == 40
+
+
+async def test_ac_delivered_power_is_cleared_while_vebus_is_invalid():
+    """Published as None, not left out: a stale value would keep steering the
+    controller, which prefers it to battery_power. A snapshot holding only
+    that None is not a reading, so the switch flags stay off it too."""
+    client = _fake_client()
+    client.async_read_holding_block = _vebus_reads(
+        _ac_out_block(0, dc_voltage_raw=0, ac_in_word=20)
+    )
+    driver = _driver(client)
+
+    data = await driver.read_telemetry(["ac_delivered_power"])
+
+    assert data == {"ac_delivered_power": None}
+
+
+async def test_a_failed_vebus_read_leaves_ac_delivered_power_alone():
+    client = _fake_client()
+    driver = _driver(client)
+
+    assert await driver.read_telemetry(["ac_delivered_power"]) == {}
