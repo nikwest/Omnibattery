@@ -662,6 +662,18 @@
           "port": "Port HTTP (par défaut 80)"
         }
       },
+      "reconfigure_battery_apsystems_ezhi": {
+        "title": "Reconfigurer la batterie {battery_num} : APsystems EZHI",
+        "description": "Activez d'abord le mode local dans l'application AP EasyPower, puis saisissez l'adresse IP de l'EZHI.",
+        "data": {
+          "name": "Nom",
+          "host": "Adresse IP",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "Adresse IP de l'EZHI sur votre réseau."
+        }
+      },
       "reconfigure_battery_sessy": {
         "title": "Reconfigurer la batterie {battery_num} — Connexion (Sessy)",
         "description": "Mettez à jour les informations de connexion de la batterie Sessy {battery_num}. Tous les autres réglages sont conservés.",
@@ -802,6 +814,18 @@
         "description": "Une sauvegarde de {count} configuration(s) précédente(s) (connexion, options et réglages) a été trouvée. La restaurer pour tout récupérer sans reconfigurer ? Vos entités et votre historique se reconnecteront automatiquement.",
         "data": {
           "restore": "Restaurer la configuration précédente"
+        }
+      },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Batterie {battery_num} : APsystems EZHI",
+        "description": "Activez d'abord le mode local dans l'application AP EasyPower, puis saisissez l'adresse IP de l'EZHI.",
+        "data": {
+          "name": "Nom",
+          "host": "Adresse IP",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "Adresse IP de l'EZHI sur votre réseau."
         }
       },
       "battery_connection_sessy": {
@@ -1511,6 +1535,18 @@
           "hourly_balance_hysteresis_w": "Variation minimale du décalage nécessaire pour appliquer une nouvelle correction. Évite les micro-ajustements à chaque cycle. 0 = appliquer toujours. Par défaut : 15 W."
         }
       },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Batterie {battery_num} : APsystems EZHI",
+        "description": "Activez d'abord le mode local dans l'application AP EasyPower, puis saisissez l'adresse IP de l'EZHI.",
+        "data": {
+          "name": "Nom",
+          "host": "Adresse IP",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "Adresse IP de l'EZHI sur votre réseau."
+        }
+      },
       "battery_connection_sessy": {
         "title": "Configurer la batterie {battery_num} — Connexion (Sessy)",
         "description": "Modifiez les informations de connexion et les identifiants locaux du dongle de la batterie Sessy {battery_num}.",
@@ -1750,7 +1786,16 @@
         "name": "Charge Prédictive"
       },
       "predictive_charging_notifications": {
-        "name": "Notifications de Charge Prédictive"
+        "name": "Notifications : Plan avec Charge"
+      },
+      "notify_plan_info": {
+        "name": "Notifications : Plan Informatif"
+      },
+      "notify_execution": {
+        "name": "Notifications : Exécution"
+      },
+      "notify_modes": {
+        "name": "Notifications : Modes"
       },
       "vacation_mode": {
         "name": "Mode vacances"
@@ -1775,9 +1820,6 @@
       },
       "grid_import_window_15min": {
         "name": "Fenêtre de 15 min d'Import Réseau"
-      },
-      "capacity_protection_excluded_devices": {
-        "name": "Écrêtement des Pointes pour Appareils Exclus"
       },
       "backup_function": {
         "name": "Fonction de Secours"
@@ -2070,6 +2112,9 @@
       },
       "max_discharge_power": {
         "name": "Puissance max. décharge"
+      },
+      "device_temperature": {
+        "name": "Température de l'onduleur"
       },
       "internal_temperature": {
         "name": "Température Interne"
@@ -3079,6 +3124,10 @@
     "use_measured_round_trip_efficiency": {
       "name": "Utiliser le rendement aller-retour mesuré",
       "description": "Supprime la valeur fixe du rendement aller-retour : le planificateur utilise de nouveau le rendement mesuré sur vos batteries (0,85 tant qu'aucune batterie n'a assez d'historique). L'éditeur de valeur du tableau de bord l'appelle depuis « Utiliser la mesure »."
+    },
+    "use_measured_solar_safety_margin": {
+      "name": "Utiliser la marge de sécurité solaire apprise",
+      "description": "Supprime la valeur fixe de la marge de sécurité de la prévision solaire : le planificateur utilise à nouveau la marge apprise sur les 14 derniers jours (10 % tant qu'il n'y a pas 7 jours). L'éditeur de valeur du tableau de bord l'appelle depuis « Utiliser la mesure »."
     }
   }
 }

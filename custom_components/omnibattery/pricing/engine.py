@@ -97,8 +97,9 @@ from . import (
     SLOT_PURPOSE_DEFICIT,
     SLOT_PURPOSE_NEGATIVE_PRICE,
     calculations,
-    notifications,
 )
+from ..notifications import async_dismiss, async_notify, language
+from ..notifications import plan as notifications
 from .calculations import normalize_price_slots
 from .chronological import (
     ENERGY_TOLERANCE_KWH,
@@ -2884,7 +2885,11 @@ class PricingManager:
                     getattr(self._controller, "predischarge_reserve_soc", 0.0)
                 ),
                 headroom_margin_pct=float(
-                    getattr(self._controller, "_predictive_safety_margin_pct", 0.0)
+                    getattr(
+                        self._controller,
+                        "_solar_headroom_margin_pct",
+                        getattr(self._controller, "_predictive_safety_margin_pct", 0.0),
+                    )
                     or 0.0
                 ),
                 charge_power_w=self._planning_charge_capacity(),
@@ -3851,6 +3856,8 @@ class PricingManager:
         no order of a plan it replaced."""
         controller = self._controller
         controller._dp_plan_holds = None
+        controller._dp_plan_saving = None
+        controller._dp_plan_quarters = None
         controller._dp_plan_weekly_holds = None
         controller._dp_weekly_full_at = None
         controller._dp_plan_exports = None
@@ -3881,6 +3888,16 @@ class PricingManager:
             if decision_data.get("planner") == "optimizer"
             else None
         )
+        self._controller._dp_plan_saving = (
+            getattr(plan, "plan_saving", None)
+            if decision_data.get("planner") == "optimizer"
+            else None
+        )
+        self._controller._dp_plan_quarters = (
+            tuple(getattr(plan, "quarter_actions", ()) or ())
+            if decision_data.get("planner") == "optimizer"
+            else None
+        )
         # Step 4: a pending weekly charge's holds, executed by the weekly
         # hold whether the Discharge Reserve is on or not (D-5).
         weekly_pending = getattr(self._controller, "_weekly_full_charge_pending", None)
@@ -3892,6 +3909,19 @@ class PricingManager:
         self._controller._dp_plan_weekly_holds = (
             frozenset(getattr(plan, "weekly_holds", None) or ()) if weekly_on else None
         )
+        # A guaranteed floor and a weekly charge are paid for; without them a
+        # plan dearer than no plan is a fault of the plan (the sweep's I8).
+        saving = self._controller._dp_plan_saving
+        if (
+            saving is not None
+            and saving < -0.01
+            and not weekly_on
+            and not decision_data.get("floor_active")
+        ):
+            _LOGGER.warning(
+                "Dynamic pricing: the plan costs %.2f more than the battery with no plan",
+                -saving,
+            )
         self._controller._dp_weekly_full_at = (
             getattr(plan, "weekly_full_at", None) if weekly_on else None
         )
@@ -6070,11 +6100,12 @@ class PricingManager:
             "exports": getattr(controller, "_dp_plan_exports", None),
             "sales": getattr(controller, "_dp_plan_sales", None),
             "solar_delay": bool(getattr(controller, "_dp_plan_solar_delay", False)),
+            "quarters": getattr(controller, "_dp_plan_quarters", None) or (),
             "room": {
                 slot: kw for slot, (kw, _level) in getattr(self._plan_room(), "orders", {}).items()
             },
         }
-        title, message = notifications.format_dynamic_pricing_notification(
+        title, message, category = notifications.format_dynamic_pricing_notification(
             decision_data,
             schedule,
             unit=self._get_price_unit(),
@@ -6085,6 +6116,9 @@ class PricingManager:
             max_charge_capacity=self._planning_charge_capacity(),
             plan_orders=orders,
             arbitrage_margin=getattr(controller, "min_arbitrage_margin", None),
+            plan_saving=getattr(controller, "_dp_plan_saving", None),
+            now=self._now(),
+            lang=language(self._hass),
         )
         targets = getattr(schedule, "slot_energy_targets_kwh", None) or {}
         slots = getattr(schedule, "selected_slots", None) or []
@@ -6104,40 +6138,24 @@ class PricingManager:
         if key == self._last_dp_notification_key:
             _LOGGER.debug("Dynamic Pricing plan unchanged, notification not re-sent")
             return
-        await self._async_create_predictive_notification(
-            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation"
-        )
         # ponytail: in memory only, so a restart sends the plan once more; a dismissed
         # notification stays dismissed while the plan does not change.
         # A muted send shows nothing, so it must not count as announced.
-        if getattr(self._controller, "predictive_charging_notifications_enabled", True):
+        if await self._async_create_predictive_notification(
+            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation", category
+        ):
             self._last_dp_notification_key = key
 
     async def _async_create_predictive_notification(
-        self, title: str, message: str, notification_id: str
-    ) -> None:
-        """Create a predictive-charging persistent notification unless muted.
+        self, title: str, message: str, notification_id: str, category: str
+    ) -> bool:
+        """Send a predictive-charging notification through the gateway.
 
-        The ``predictive_charging_notifications`` switch only silences the
-        announcement: the evaluation itself, its schedule and its diagnostics
-        are unaffected and stay visible on the dashboard and sensors.
+        The gateway drops it when the category is muted (and returns False): the
+        evaluation itself, its schedule and its diagnostics are unaffected and
+        stay visible on the dashboard and sensors.
         """
-        if not getattr(self._controller, "predictive_charging_notifications_enabled", True):
-            _LOGGER.debug(
-                "Predictive charging notification suppressed (%s): %s",
-                notification_id,
-                title,
-            )
-            return
-        await self._hass.services.async_call(
-            "persistent_notification",
-            "create",
-            {
-                "title": title,
-                "message": message,
-                "notification_id": notification_id,
-            },
-        )
+        return await async_notify(self._hass, category, notification_id, title, message)
 
     def _contracted_charge_ceiling(self) -> float:
         """The configured grid import cap (#506), which also caps grid charging.
@@ -6281,14 +6299,16 @@ class PricingManager:
         if not schedule:
             return
 
-        title, message = notifications.format_slot_start_notification(
+        title, message, category = notifications.format_slot_start_notification(
             slot,
             schedule,
             unit=self._get_price_unit(),
             max_contracted_power=self._controller.max_contracted_power,
+            now=self._now(),
+            lang=language(self._hass),
         )
         await self._async_create_predictive_notification(
-            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation"
+            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation", category
         )
 
     async def _check_dp_pre_slot_reevaluation(self) -> None:
@@ -6453,13 +6473,15 @@ class PricingManager:
 
         Only called when should_charge=True. Skipped slots are logged silently.
         """
-        title, message = notifications.format_dp_pre_slot_reevaluation_notification(
+        title, message, category = notifications.format_dp_pre_slot_reevaluation_notification(
             slot,
             decision,
             unit=self._get_price_unit(),
+            now=self._now(),
+            lang=language(self._hass),
         )
         await self._async_create_predictive_notification(
-            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation"
+            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation", category
         )
 
     def _is_evening_reevaluation_time(self) -> bool:
@@ -8867,10 +8889,8 @@ class PricingManager:
                 self._controller.error_integral = 0.0
                 self._controller.previous_error = 0.0
                 self._controller.sign_changes = 0
-                await self._hass.services.async_call(
-                    "persistent_notification",
-                    "dismiss",
-                    {"notification_id": f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation"},
+                await async_dismiss(
+                    self._hass, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation"
                 )
 
             self._controller._slot_entry_time = None
@@ -8888,18 +8908,20 @@ class PricingManager:
             decision_data: Dict from _should_activate_grid_charging() with decision factors
             is_daily_evaluation: True when called from daily evaluation in automation_slots mode
         """
-        # Format the notification using the pricing.notifications helper
-        title, message = notifications.format_predictive_notification_message(
+        # Format the notification using the notifications.plan helper
+        title, message, category = notifications.format_predictive_notification_message(
             decision_data,
             is_daily_evaluation,
             max_contracted_power=self._controller.max_contracted_power,
             max_charge_capacity=self._planning_charge_capacity(),
             charging_time_slot=self._controller._active_charging_slot(),
+            now=self._now(),
+            lang=language(self._hass),
         )
 
         # Send the notification
         await self._async_create_predictive_notification(
-            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation"
+            title, message, f"{NOTIFICATION_ID_PREFIX}predictive_charging_evaluation", category
         )
 
     # =========================================================================

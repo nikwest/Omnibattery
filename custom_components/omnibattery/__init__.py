@@ -45,7 +45,6 @@ from .const import (
     NOTIFICATION_ID_PREFIX,
     CONF_ENABLE_PREDICTIVE_CHARGING,
     CONF_VACATION_MODE_ENABLED,
-    CONF_PREDICTIVE_CHARGING_NOTIFICATIONS_ENABLED,
     CONF_CHARGING_TIME_SLOT,
     CONF_SOLAR_FORECAST_SENSOR,
     CONF_SOLAR_FORECAST_REMAINING_SENSOR,
@@ -196,7 +195,6 @@ from .const import (
     CONF_METER_INVERTED,
     CONF_PREDICTIVE_SAFETY_MARGIN_KWH,
     CONF_PREDICTIVE_SAFETY_MARGIN_PCT,
-    DEFAULT_PREDICTIVE_SAFETY_MARGIN_PCT,
     CONF_PREDICTIVE_GRID_CHARGE_MARGIN_PCT,
     CONF_PREDICTIVE_MIN_SOC_FLOOR,
     DEFAULT_PREDICTIVE_MIN_SOC_FLOOR,
@@ -257,6 +255,7 @@ from .control.surplus_price_hold import SurplusPriceHoldManager
 from .infra.coordinator import MarstekVenusDataUpdateCoordinator
 from .infra.mac_tracking import publishable_macs
 from .infra.device_lookup import get_entry_device
+from .notifications import HEALTH, async_dismiss, async_notify, load_categories, text
 from .tracking.hourly_balance import HourlyBalanceManager
 from .tracking.non_responsive_tracker import NonResponsiveTracker
 from .tracking.daily_timeline import (
@@ -294,7 +293,6 @@ from .pricing import (
     SLOT_PURPOSE_DEFICIT,
     SLOT_PURPOSE_NEGATIVE_PRICE,
     calculations,
-    notifications,
 )
 from .pricing.engine import DynamicPricingEvaluationHorizon, PricingManager
 
@@ -1020,9 +1018,7 @@ class ChargeDischargeController:
         # Predictive Grid Charging state
         self.predictive_charging_enabled = config_entry.data.get(CONF_ENABLE_PREDICTIVE_CHARGING, False)
         self.vacation_mode_enabled = config_entry.data.get(CONF_VACATION_MODE_ENABLED, False)
-        self.predictive_charging_notifications_enabled = config_entry.data.get(
-            CONF_PREDICTIVE_CHARGING_NOTIFICATIONS_ENABLED, True
-        )
+        load_categories(self.hass, config_entry.data)
         # Predictive charging windows: list of {start_time, end_time, days} dicts.
         # Legacy configs stored a single dict — normalize to a one-element list.
         _raw_slots = config_entry.data.get(CONF_CHARGING_TIME_SLOT, None)
@@ -1309,9 +1305,6 @@ class ChargeDischargeController:
             self, config_entry.data
         )
         self.capacity_protection_enabled = config_entry.data.get(CONF_CAPACITY_PROTECTION_ENABLED, False)
-        self.capacity_protection_excluded_devices = config_entry.data.get(
-            CONF_CAPACITY_PROTECTION_EXCLUDED_DEVICES, False
-        )
         self.capacity_protection_soc_threshold = config_entry.data.get(CONF_CAPACITY_PROTECTION_SOC_THRESHOLD, DEFAULT_CAPACITY_PROTECTION_SOC)
         self._capacity_protection_active = False  # True while either peak-shaving mode intervenes
         self._excluded_included_adjustment = 0.0  # Tracks excluded device adjustment for included_in_consumption devices
@@ -1350,9 +1343,9 @@ class ChargeDischargeController:
         )
         # Share of the forecast sun each planner gives up (see
         # pricing.calculations.solar_safety_margin_kwh).
-        self._predictive_safety_margin_pct: float = config_entry.data.get(
-            CONF_PREDICTIVE_SAFETY_MARGIN_PCT, DEFAULT_PREDICTIVE_SAFETY_MARGIN_PCT
-        )
+        # The stored value, else the learned one (refreshed again once the
+        # tracker has loaded its history and every time a day closes).
+        calculations.refresh_solar_safety_margin(self)
         self._predictive_min_soc_floor: float = config_entry.data.get(CONF_PREDICTIVE_MIN_SOC_FLOOR, DEFAULT_PREDICTIVE_MIN_SOC_FLOOR)
         # Backward-compat default: if the key is absent but floor > 0 was stored, keep it active.
         self._predictive_min_soc_floor_enabled: bool = config_entry.data.get(
@@ -2029,6 +2022,11 @@ class ChargeDischargeController:
         # A pending weekly full charge lifts the ceiling to 100%, the same
         # ceiling every planner charge path uses (_charge_ceiling_soc).
         weekly_pending = ChargeDischargeController._weekly_full_charge_pending(self)
+        # The plan's floor (#941): peak shaving's SOC band is a peak reserve,
+        # not normal-load energy, unless peak shaving already holds the battery
+        # (the engine's own rule, #627).
+        held_check = getattr(self, "_is_capacity_protection_soc_limited", None)
+        held = callable(held_check) and held_check() is True
         result = []
         for index, coordinator in enumerate(getattr(self, "coordinators", ())):
             manual_owned = self._is_battery_manual_owned(coordinator)
@@ -2053,7 +2051,12 @@ class ChargeDischargeController:
                     stored_kwh=capacity * max(0.0, min(100.0, soc)) / 100.0,
                     capacity_kwh=capacity,
                     min_soc_pct=self._daily_operation_float(
-                        effective_min_soc(coordinator), 0.0
+                        effective_min_soc(coordinator)
+                        if held
+                        else ChargeDischargeController._planning_floor_soc(
+                            self, coordinator
+                        ),
+                        0.0,
                     ),
                     max_soc_pct=(
                         100.0
@@ -3422,9 +3425,7 @@ class ChargeDischargeController:
         self.vacation_mode_enabled = self.config_entry.data.get(
             CONF_VACATION_MODE_ENABLED, False
         )
-        self.predictive_charging_notifications_enabled = self.config_entry.data.get(
-            CONF_PREDICTIVE_CHARGING_NOTIFICATIONS_ENABLED, True
-        )
+        load_categories(self.hass, self.config_entry.data)
         if self._phase_power_limiter is not None:
             self._phase_power_limiter.refresh_config()
             self._phase_power_limiter.update_manual_mode_warning(
@@ -3436,7 +3437,7 @@ class ChargeDischargeController:
         old_curtailment_config = (
             self.negative_injection_threshold,
             self.predischarge_reserve_soc,
-            self._predictive_safety_margin_pct,
+            self._solar_headroom_margin_pct,
         )
         old_negative_price_enabled = self.negative_price_charging_enabled
         # Update weekly full charge settings; reset completion state if day changed
@@ -3511,9 +3512,7 @@ class ChargeDischargeController:
         self._weekly_full_charge_skip_delay = self.config_entry.data.get(
             CONF_WEEKLY_FULL_CHARGE_SKIP_DELAY, DEFAULT_WEEKLY_FULL_CHARGE_SKIP_DELAY
         )
-        self._predictive_safety_margin_pct = self.config_entry.data.get(
-            CONF_PREDICTIVE_SAFETY_MARGIN_PCT, DEFAULT_PREDICTIVE_SAFETY_MARGIN_PCT
-        )
+        calculations.refresh_solar_safety_margin(self)
         self._predictive_min_soc_floor = self.config_entry.data.get(CONF_PREDICTIVE_MIN_SOC_FLOOR, DEFAULT_PREDICTIVE_MIN_SOC_FLOOR)
         self._predictive_min_soc_floor_enabled = self.config_entry.data.get(CONF_ENABLE_MIN_SOC_FLOOR, self._predictive_min_soc_floor_enabled)
         self._charge_delay_status["soc_setpoint"] = self._delay_soc_setpoint if self._delay_soc_setpoint_enabled else None
@@ -3558,7 +3557,7 @@ class ChargeDischargeController:
         new_curtailment_config = (
             self.negative_injection_threshold,
             self.predischarge_reserve_soc,
-            self._predictive_safety_margin_pct,
+            self._solar_headroom_margin_pct,
         )
         new_negative_price_enabled = self.negative_price_charging_enabled
         old_surplus_hold_config = (
@@ -3609,9 +3608,6 @@ class ChargeDischargeController:
             self, self.config_entry.data
         )
         self.capacity_protection_enabled = self.config_entry.data.get(CONF_CAPACITY_PROTECTION_ENABLED, False)
-        self.capacity_protection_excluded_devices = self.config_entry.data.get(
-            CONF_CAPACITY_PROTECTION_EXCLUDED_DEVICES, False
-        )
         self.capacity_protection_soc_threshold = self.config_entry.data.get(CONF_CAPACITY_PROTECTION_SOC_THRESHOLD, DEFAULT_CAPACITY_PROTECTION_SOC)
 
         if (
@@ -5603,7 +5599,6 @@ class ChargeDischargeController:
             "original_target": original_target,
             "adjusted_target": active_target,
             "soc_threshold": self.capacity_protection_soc_threshold,
-            "excluded_devices_enabled": self.capacity_protection_excluded_devices,
         })
         return active_target, sensor_actual
 
@@ -6809,21 +6804,13 @@ class ChargeDischargeController:
         physical_base_load = (
             sensor_filtered - measured if measured is not None else sensor_filtered
         )
-        excluded_adjustment = float(
-            getattr(self, "_excluded_included_adjustment", 0.0) or 0.0
-        )
-        base_load = (
-            physical_base_load
-            if getattr(self, "capacity_protection_excluded_devices", False)
-            else physical_base_load - excluded_adjustment
-        )
         trigger = max(float(self.deadband), 50.0)
         hard_margin = max(3.0 * trigger, _PREDICTIVE_HARD_LIMIT_MIN_MARGIN_W)
         emergency = physical_base_load > ChargeDischargeController._grid_import_cap_w(self) + hard_margin
         # The house alone above the grid import cap is not an emergency: it only
         # needs the charge handed over, so it is judged against the ordinary
         # trigger and confirmed faster (#683).
-        peak = self.capacity_protection_enabled and base_load > target_power + trigger
+        peak = self.capacity_protection_enabled and physical_base_load > target_power + trigger
 
         if not (emergency or peak):
             self._predictive_hard_limit_samples = 0
@@ -7014,24 +7001,12 @@ class ChargeDischargeController:
         physical_base_load = (
             sensor_filtered - measured if measured is not None else sensor_filtered
         )
-        # Peak Shaving's optional excluded-device switch retains its existing
-        # meaning during a predictive slot.  Contracted-power emergency is
-        # always based on physical import because the meter/ICP sees all loads.
-        excluded_adjustment = float(
-            getattr(self, "_excluded_included_adjustment", 0.0) or 0.0
-        )
-        base_load = (
-            physical_base_load
-            if getattr(self, "capacity_protection_excluded_devices", False)
-            else physical_base_load - excluded_adjustment
-        )
         trigger = max(float(self.deadband), 50.0)
         emergency = physical_base_load > ChargeDischargeController._grid_import_cap_w(self) + trigger
-        peak = self.capacity_protection_enabled and base_load > ceiling + trigger
+        peak = self.capacity_protection_enabled and physical_base_load > ceiling + trigger
         if emergency or peak:
-            # Emergency is always physical: excluded-device policy may reduce
-            # ordinary Peak Shaving, but never the import seen by the ICP.
-            peak_requested = max(0.0, base_load - ceiling) if peak else 0.0
+            # Both read the real meter, excluded devices included (#949).
+            peak_requested = max(0.0, physical_base_load - ceiling) if peak else 0.0
             emergency_requested = (
                 max(0.0, physical_base_load - ChargeDischargeController._grid_import_cap_w(self))
                 if emergency else 0.0
@@ -7064,9 +7039,7 @@ class ChargeDischargeController:
             self.previous_power = 0
             self._set_predictive_protection_status(
                 bool(peak or emergency), self._predictive_protection_reason,
-                estimated_house_load=round(
-                    physical_base_load if emergency else base_load
-                ),
+                estimated_house_load=round(physical_base_load),
             )
             return
 
@@ -8116,6 +8089,9 @@ class ChargeDischargeController:
                         direction="charge",
                     )
             if skip_write:
+                # The battery already sits at the commanded set-points: the link
+                # works, so a spell opened by a write glitch ends here (#945).
+                self._non_responsive.record_write_ok(coordinator)
                 # Polled set-points match the commanded values exactly — this is
                 # the deferred settled verification a tolerance-only ACK left
                 # pending (see the readback branch below).
@@ -8166,6 +8142,10 @@ class ChargeDischargeController:
                         coordinator.name, attempt + 1, last_fail_reason
                     )
                 continue
+
+            # The write went through: a spell that only comms failures opened
+            # ends here, whatever power was commanded (#945).
+            self._non_responsive.record_write_ok(coordinator)
 
             # Write-only cycle: no readback this cycle, so no ACK check or
             # non-delivery detection. The write itself succeeded.
@@ -11488,8 +11468,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 meant "use the measured value"; that is now the absent key, so
                 the key is dropped and a stored 0.85 from then on is a fixed
                 value.
+    v21 -> v22: the Peak Shaving for excluded devices switch is removed
+                (#949); its key and entity go.
     """
-    if entry.version >= 21:
+    if entry.version >= 22:
         return True
 
     new_data = dict(entry.data)
@@ -11974,12 +11956,31 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "(round-trip efficiency 0.85 now means the measured value only when unset)",
         )
 
+    if entry.version < 22:
+        from homeassistant.helpers import entity_registry as er
+        from .infra.entity_naming import SYSTEM_UNIQUE_ID_PREFIX
+
+        # #949: the grid import cap always counts excluded devices, so their
+        # Peak Shaving switch is gone.
+        new_data.pop(CONF_CAPACITY_PROTECTION_EXCLUDED_DEVICES, None)
+        ent_reg = er.async_get(hass)
+        entity_id = ent_reg.async_get_entity_id(
+            "switch", DOMAIN,
+            f"{SYSTEM_UNIQUE_ID_PREFIX}{CONF_CAPACITY_PROTECTION_EXCLUDED_DEVICES}",
+        )
+        if entity_id:
+            ent_reg.async_remove(entity_id)
+        _LOGGER.info(
+            "Omnibattery: migrated config entry to version 22 "
+            "(Peak Shaving for excluded devices switch removed)",
+        )
+
     hass.config_entries.async_update_entry(
         entry,
         title="Omnibattery",
         data=new_data,
         options=new_options,
-        version=21,
+        version=22,
     )
     return True
 
@@ -12076,11 +12077,7 @@ async def _dismiss_legacy_active_balance_notifications(
                 )
 
     for notification_id in notification_ids:
-        await hass.services.async_call(
-            "persistent_notification",
-            "dismiss",
-            {"notification_id": notification_id},
-        )
+        await async_dismiss(hass, notification_id)
 
 
 async def _async_migrate_legacy_active_balance(
@@ -12225,21 +12222,15 @@ async def _async_migrate_legacy_active_balance(
             battery["manual_set_charge_power"] = 0
             battery["manual_set_discharge_power"] = 0
             data_changed = True
-            await hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "notification_id": (
-                        f"{NOTIFICATION_ID_PREFIX}active_balance_migration_"
-                        f"{coordinator.device_key}"
-                    ),
-                    "title": f"{coordinator.name}: active balance migration paused",
-                    "message": (
-                        "The old integrated active-balance run could not be migrated "
-                        f"safely ({err}). The battery is held in manual mode at 0 W. "
-                        "Keep it available and reload Omnibattery to retry."
-                    ),
-                },
+            await async_notify(
+                hass,
+                HEALTH,
+                (
+                    f"{NOTIFICATION_ID_PREFIX}active_balance_migration_"
+                    f"{coordinator.device_key}"
+                ),
+                text(hass, "migration.title", name=coordinator.name),
+                text(hass, "migration.message", error=err),
             )
             _LOGGER.error(
                 "[%s] Could not migrate integrated active-balance state; "
@@ -12256,6 +12247,7 @@ async def _async_migrate_legacy_active_balance(
 
 SERVICE_EXCLUDE_CONSUMPTION_DAYS = "exclude_consumption_days"
 SERVICE_USE_MEASURED_ROUND_TRIP_EFFICIENCY = "use_measured_round_trip_efficiency"
+SERVICE_USE_MEASURED_SOLAR_SAFETY_MARGIN = "use_measured_solar_safety_margin"
 ATTR_START_DATE = "start_date"
 ATTR_END_DATE = "end_date"
 
@@ -12326,6 +12318,25 @@ def _async_register_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_USE_MEASURED_ROUND_TRIP_EFFICIENCY,
         _async_use_measured_round_trip_efficiency,
+    )
+
+    async def _async_use_measured_solar_safety_margin(call: ServiceCall) -> None:
+        """Drop a fixed solar safety margin: the learned one applies again.
+
+        Same way back as the efficiency: the panel's value editor calls it.
+        """
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            if CONF_PREDICTIVE_SAFETY_MARGIN_PCT not in entry.data:
+                continue
+            data = dict(entry.data)
+            data.pop(CONF_PREDICTIVE_SAFETY_MARGIN_PCT)
+            hass.config_entries.async_update_entry(entry, data=data)
+            _LOGGER.info("Solar safety margin follows the learned value again")
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_USE_MEASURED_SOLAR_SAFETY_MARGIN,
+        _async_use_measured_solar_safety_margin,
     )
 
 
@@ -12412,7 +12423,6 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, opened: li
             CONF_DELAY_SOC_SETPOINT_ENABLED,
             CONF_ENABLE_TEMP_CHARGE_LIMIT,
             CONF_CAPACITY_PROTECTION_ENABLED,
-            CONF_CAPACITY_PROTECTION_EXCLUDED_DEVICES,
             CONF_ENABLE_HOURLY_BALANCE,
             CONF_HIGH_PRICE_DISCHARGE_ENABLED,
             CONF_HIGH_PRICE_SURPLUS_EXPORT_ENABLED,
@@ -13208,6 +13218,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _async_unregister_frontend_panel(hass)
         hass.services.async_remove(DOMAIN, SERVICE_EXCLUDE_CONSUMPTION_DAYS)
         hass.services.async_remove(DOMAIN, SERVICE_USE_MEASURED_ROUND_TRIP_EFFICIENCY)
+        hass.services.async_remove(DOMAIN, SERVICE_USE_MEASURED_SOLAR_SAFETY_MARGIN)
 
     return unload_ok
 

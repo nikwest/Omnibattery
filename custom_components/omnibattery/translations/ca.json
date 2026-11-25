@@ -662,6 +662,18 @@
           "port": "Port HTTP (per defecte 80)"
         }
       },
+      "reconfigure_battery_apsystems_ezhi": {
+        "title": "Reconfigura la bateria {battery_num}: APsystems EZHI",
+        "description": "Activa primer el mode local a l'app AP EasyPower i després introdueix l'adreça IP de l'EZHI.",
+        "data": {
+          "name": "Nom",
+          "host": "Adreça IP",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "Adreça IP de l'EZHI a la teva xarxa."
+        }
+      },
       "reconfigure_battery_sessy": {
         "title": "Reconfigura la bateria {battery_num} — Connexió (Sessy)",
         "description": "Actualitza les dades de connexió de la bateria Sessy {battery_num}. La resta de configuració es conserva.",
@@ -802,6 +814,18 @@
         "description": "S'ha trobat una còpia de seguretat de {count} configuració(ns) anterior(s) (connexió, opcions i ajust). Vols restaurar-la per recuperar-ho tot sense tornar a configurar? Les teves entitats i historial es reconnectaran automàticament.",
         "data": {
           "restore": "Restaura la configuració anterior"
+        }
+      },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Bateria {battery_num}: APsystems EZHI",
+        "description": "Activa primer el mode local a l'app AP EasyPower i després introdueix l'adreça IP de l'EZHI.",
+        "data": {
+          "name": "Nom",
+          "host": "Adreça IP",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "Adreça IP de l'EZHI a la teva xarxa."
         }
       },
       "battery_connection_sessy": {
@@ -1511,6 +1535,18 @@
           "hourly_balance_hysteresis_w": "Canvi mínim en el desplaçament necessari per aplicar una nova correcció. Evita micro-ajustos cada cicle. 0 = aplicar sempre. Per defecte: 15 W."
         }
       },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Bateria {battery_num}: APsystems EZHI",
+        "description": "Activa primer el mode local a l'app AP EasyPower i després introdueix l'adreça IP de l'EZHI.",
+        "data": {
+          "name": "Nom",
+          "host": "Adreça IP",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "Adreça IP de l'EZHI a la teva xarxa."
+        }
+      },
       "battery_connection_sessy": {
         "title": "Configura la bateria {battery_num} — Connexió (Sessy)",
         "description": "Modifica les dades de connexió i les credencials locals del dongle de la bateria Sessy {battery_num}.",
@@ -1750,7 +1786,16 @@
         "name": "Càrrega Predictiva"
       },
       "predictive_charging_notifications": {
-        "name": "Notificacions de Càrrega Predictiva"
+        "name": "Notificacions: Pla amb Càrrega"
+      },
+      "notify_plan_info": {
+        "name": "Notificacions: Pla Informatiu"
+      },
+      "notify_execution": {
+        "name": "Notificacions: Execució"
+      },
+      "notify_modes": {
+        "name": "Notificacions: Modes"
       },
       "vacation_mode": {
         "name": "Mode vacances"
@@ -1775,9 +1820,6 @@
       },
       "grid_import_window_15min": {
         "name": "Finestra de 15 min d'Importació de Xarxa"
-      },
-      "capacity_protection_excluded_devices": {
-        "name": "Reducció de Pics per a Dispositius Exclosos"
       },
       "backup_function": {
         "name": "Funció de Reserva"
@@ -2070,6 +2112,9 @@
       },
       "max_discharge_power": {
         "name": "Màx. potència de descàrrega"
+      },
+      "device_temperature": {
+        "name": "Temperatura de l'inversor"
       },
       "internal_temperature": {
         "name": "Temperatura Interna"
@@ -3079,6 +3124,10 @@
     "use_measured_round_trip_efficiency": {
       "name": "Fer servir l'eficiència de cicle complet mesurada",
       "description": "Elimina el valor fix de l'eficiència de cicle complet: el planificador torna a fer servir l'eficiència mesurada a les teves bateries (0,85 fins que una bateria tingui prou historial). L'editor de valor del panell la crida des de «Fer servir la mesurada»."
+    },
+    "use_measured_solar_safety_margin": {
+      "name": "Fer servir el marge de seguretat solar après",
+      "description": "Elimina el valor fix del marge de seguretat de la previsió solar: el planificador torna a fer servir el marge après dels últims 14 dies (10 % fins a tenir 7 dies). L'editor de valor del panell la crida des de «Fer servir la mesurada»."
     }
   }
 }

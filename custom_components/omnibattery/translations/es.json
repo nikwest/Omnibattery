@@ -662,6 +662,18 @@
           "port": "Puerto HTTP (por defecto 80)"
         }
       },
+      "reconfigure_battery_apsystems_ezhi": {
+        "title": "Reconfigurar batería {battery_num}: APsystems EZHI",
+        "description": "Activa primero el modo local en la app AP EasyPower y luego introduce la dirección IP del EZHI.",
+        "data": {
+          "name": "Nombre",
+          "host": "Dirección IP",
+          "port": "Puerto"
+        },
+        "data_description": {
+          "host": "Dirección IP del EZHI en tu red."
+        }
+      },
       "reconfigure_battery_sessy": {
         "title": "Reconfigurar batería {battery_num} — Conexión (Sessy)",
         "description": "Actualiza los datos de conexión de la batería Sessy {battery_num}. El resto de ajustes se conserva.",
@@ -802,6 +814,18 @@
         "description": "Se encontró una copia de seguridad de {count} configuración(es) anterior(es) (conexión, opciones y ajuste). ¿Restaurarla para recuperar todo sin configurarlo de nuevo? Tus entidades e histórico se reconectarán automáticamente.",
         "data": {
           "restore": "Restaurar la configuración anterior"
+        }
+      },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Batería {battery_num}: APsystems EZHI",
+        "description": "Activa primero el modo local en la app AP EasyPower y luego introduce la dirección IP del EZHI.",
+        "data": {
+          "name": "Nombre",
+          "host": "Dirección IP",
+          "port": "Puerto"
+        },
+        "data_description": {
+          "host": "Dirección IP del EZHI en tu red."
         }
       },
       "battery_connection_sessy": {
@@ -1511,6 +1535,18 @@
           "hourly_balance_hysteresis_w": "Cambio mínimo en el desplazamiento necesario para aplicar una nueva corrección. Evita micro-ajustes cada ciclo. 0 = aplicar siempre. Por defecto: 15 W."
         }
       },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Batería {battery_num}: APsystems EZHI",
+        "description": "Activa primero el modo local en la app AP EasyPower y luego introduce la dirección IP del EZHI.",
+        "data": {
+          "name": "Nombre",
+          "host": "Dirección IP",
+          "port": "Puerto"
+        },
+        "data_description": {
+          "host": "Dirección IP del EZHI en tu red."
+        }
+      },
       "battery_connection_sessy": {
         "title": "Configurar batería {battery_num} — Conexión (Sessy)",
         "description": "Modifica los datos de conexión y las credenciales locales del dongle de la batería Sessy {battery_num}.",
@@ -1771,7 +1807,16 @@
         "name": "Carga Predictiva"
       },
       "predictive_charging_notifications": {
-        "name": "Notificaciones de Carga Predictiva"
+        "name": "Notificaciones: Plan con Carga"
+      },
+      "notify_plan_info": {
+        "name": "Notificaciones: Plan Informativo"
+      },
+      "notify_execution": {
+        "name": "Notificaciones: Ejecución"
+      },
+      "notify_modes": {
+        "name": "Notificaciones: Modos"
       },
       "vacation_mode": {
         "name": "Modo vacaciones"
@@ -1796,9 +1841,6 @@
       },
       "grid_import_window_15min": {
         "name": "Ventana de 15 min de Importación de Red"
-      },
-      "capacity_protection_excluded_devices": {
-        "name": "Reducción de Picos para Dispositivos Excluidos"
       },
       "backup_function": {
         "name": "Función de Respaldo"
@@ -2070,6 +2112,9 @@
       },
       "max_discharge_power": {
         "name": "Máx. potencia de descarga"
+      },
+      "device_temperature": {
+        "name": "Temperatura del inversor"
       },
       "internal_temperature": {
         "name": "Temperatura Interna"
@@ -3079,6 +3124,10 @@
     "use_measured_round_trip_efficiency": {
       "name": "Usar la eficiencia de ciclo completo medida",
       "description": "Elimina el valor fijo de la eficiencia de ciclo completo: el planificador vuelve a usar la eficiencia medida en tus baterías (0,85 hasta que una batería tenga suficiente historial). El editor de valor del panel la llama desde «Usar la medida»."
+    },
+    "use_measured_solar_safety_margin": {
+      "name": "Usar el margen de seguridad solar aprendido",
+      "description": "Elimina el valor fijo del margen de seguridad de la previsión solar: el planificador vuelve a usar el margen aprendido de los últimos 14 días (10 % hasta tener 7 días). El editor de valor del panel la llama desde «Usar la medida»."
     }
   }
 }

@@ -494,9 +494,9 @@ def test_plan_within_drops_allocations_outside_the_control_slots():
 
 
 def test_notification_names_energy_deferred_to_tomorrow():
-    from custom_components.omnibattery.pricing import notifications
+    from custom_components.omnibattery.notifications import plan as notifications
 
-    title, message = notifications.format_dynamic_pricing_notification(
+    title, message, _ = notifications.format_dynamic_pricing_notification(
         {"should_charge": True, "energy_deficit_kwh": 3.0, "deferred_to_next_day": True},
         None,
         unit="EUR/kWh",
@@ -504,6 +504,7 @@ def test_notification_names_energy_deferred_to_tomorrow():
         discharge_price_threshold=None,
         max_contracted_power=3000,
         max_charge_capacity=3000,
+        now=NOW,
     )
 
     assert "nothing to charge yet" in title
@@ -513,10 +514,10 @@ def test_notification_names_energy_deferred_to_tomorrow():
 def test_extended_horizon_notification_labels_tomorrow_not_tonight():
     """#721: a horizon ending at tomorrow's midnight was labelled "until
     midnight", its whole-day overnight leg "until sunrise", and today's solar
-    plus tomorrow's forecast "Solar remaining today"."""
+    plus tomorrow's forecast as today's sun."""
     import asyncio
 
-    from custom_components.omnibattery.pricing import notifications
+    from custom_components.omnibattery.notifications import plan as notifications
 
     manager = _manager(_solar(8.0))
 
@@ -547,22 +548,38 @@ def test_extended_horizon_notification_labels_tomorrow_not_tonight():
             max_contracted_power=3000,
             max_charge_capacity=3000,
             charging_time_slot=None,
+            now=NOW,
         )[1]
 
     message = _message(
         asyncio.run(manager._evaluate_remaining_grid_charging(now=NOW, horizon_end=CAP))
     )
-    assert "remaining until tomorrow midnight: 14.00 kWh" in message
-    assert "🌙 Of which tomorrow (00:00-24:00): 12.00 kWh" in message
-    assert "Solar remaining today: 0.00 kWh" in message
-    assert "Solar tomorrow: 8.00 kWh" in message
+    assert (
+        "\n\n| kWh | Today | Tomorrow | Total |\n|---|---|---|---|\n"
+        "| ☀️ Solar forecast | 0.00 | 8.00 | 8.00 |\n"
+        "| 📊 House consumption | 2.00 | 12.00 | 14.00 |\n"
+        "| 🔋 Battery (50 %) |  |  | 5.00 |\n"
+        "| ✅ Available (battery + solar) |  |  | 30.00 |\n\n"
+    ) in message
     assert "until sunrise" not in message
+
+    # With a safety margin the table also has the sun the plan counts on.
+    decision = asyncio.run(
+        manager._evaluate_remaining_grid_charging(now=NOW, horizon_end=CAP)
+    )
+    decision["solar_safety_margin_kwh"] = 0.8
+    with_margin = _message(decision)
+    assert (
+        "| ☀️ Solar forecast | 0.00 | 8.00 | 8.00 |\n"
+        "| ☀️ With margin (10 %) | 0.00 | 7.20 | 7.20 |\n"
+    ) in with_margin
     assert "Sufficient energy for the rest of today and tomorrow" in message
 
     # The unextended horizon ends at tonight's midnight: wording unchanged.
     message = _message(asyncio.run(manager._evaluate_remaining_grid_charging(now=NOW)))
-    assert "remaining until midnight: 2.00 kWh" in message
-    assert "Solar tomorrow" not in message
+    assert "| kWh | Today |\n" in message
+    assert "| 📊 House consumption | 2.00 |" in message
+    assert "Tomorrow" not in message
     assert "Sufficient energy for the rest of today\n" in message
 
 

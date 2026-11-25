@@ -29,7 +29,6 @@ INIT = Path("custom_components/omnibattery/__init__.py")
 _FINGERPRINT_VIA: dict[str, str] = {}
 
 FINGERPRINT = {
-    "_predictive_safety_margin_pct",
     "_predictive_min_soc_floor",
     "_predictive_min_soc_floor_enabled",
     "max_price_threshold",
@@ -63,7 +62,6 @@ LIVE = {
     "_temp_charge_limit_c",
     "_temp_charge_limit_floor_pct",
     "_weekly_full_charge_skip_delay",
-    "capacity_protection_excluded_devices",
     "capacity_protection_soc_threshold",
     # The 15-min window moves only the real-time cap; planners read the
     # configured value (#506).
@@ -83,7 +81,6 @@ LIVE = {
     "min_discharge_power",
     "no_pd_mode_enabled",
     "offgrid_mode_enabled",
-    "predictive_charging_notifications_enabled",
     "primary_battery",
     "primary_feedforward_enabled",
     "surplus_hold_min_saving",
@@ -167,6 +164,16 @@ def test_a_planning_setting_moves_the_fingerprint(name):
     ctrl = _ctrl(**{field: 0})
     before = _fingerprint(ctrl)
     setattr(ctrl, field, 1)
+    assert _fingerprint(ctrl) != before
+
+
+def test_the_solar_safety_margin_moves_the_fingerprint():
+    # Stored or learned: refresh_solar_safety_margin() sets it, so the scan
+    # above does not see it. A day that closes with a new learned margin
+    # re-plans like a change made in the panel.
+    ctrl = _ctrl(_predictive_safety_margin_pct=10)
+    before = _fingerprint(ctrl)
+    ctrl._predictive_safety_margin_pct = 36
     assert _fingerprint(ctrl) != before
 
 

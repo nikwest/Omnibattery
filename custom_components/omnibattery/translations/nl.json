@@ -662,6 +662,18 @@
           "port": "HTTP-poort (standaard 80)"
         }
       },
+      "reconfigure_battery_apsystems_ezhi": {
+        "title": "Batterij {battery_num} opnieuw configureren: APsystems EZHI",
+        "description": "Schakel eerst de lokale modus in de AP EasyPower-app in en voer daarna het IP-adres van de EZHI in.",
+        "data": {
+          "name": "Naam",
+          "host": "IP-adres",
+          "port": "Poort"
+        },
+        "data_description": {
+          "host": "IP-adres van de EZHI in je netwerk."
+        }
+      },
       "reconfigure_battery_sessy": {
         "title": "Batterij {battery_num} opnieuw configureren — Verbinding (Sessy)",
         "description": "Werk de verbindingsgegevens voor de Sessy-batterij {battery_num} bij. Alle overige instellingen blijven behouden.",
@@ -802,6 +814,18 @@
         "description": "Er is een back-up van {count} vorige configuratie(s) (verbinding, opties en afstemming) gevonden. Herstellen om alles terug te krijgen zonder opnieuw in te stellen? Je entiteiten en geschiedenis worden automatisch opnieuw verbonden.",
         "data": {
           "restore": "Vorige configuratie herstellen"
+        }
+      },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Batterij {battery_num}: APsystems EZHI",
+        "description": "Schakel eerst de lokale modus in de AP EasyPower-app in en voer daarna het IP-adres van de EZHI in.",
+        "data": {
+          "name": "Naam",
+          "host": "IP-adres",
+          "port": "Poort"
+        },
+        "data_description": {
+          "host": "IP-adres van de EZHI in je netwerk."
         }
       },
       "battery_connection_sessy": {
@@ -1511,6 +1535,18 @@
           "hourly_balance_hysteresis_w": "Minimale verandering in de verschuiving vereist voordat een nieuwe correctie wordt toegepast. Voorkomt micro-aanpassingen elke cyclus. 0 = altijd toepassen. Standaard: 15 W."
         }
       },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Batterij {battery_num}: APsystems EZHI",
+        "description": "Schakel eerst de lokale modus in de AP EasyPower-app in en voer daarna het IP-adres van de EZHI in.",
+        "data": {
+          "name": "Naam",
+          "host": "IP-adres",
+          "port": "Poort"
+        },
+        "data_description": {
+          "host": "IP-adres van de EZHI in je netwerk."
+        }
+      },
       "battery_connection_sessy": {
         "title": "Batterij {battery_num} configureren — Verbinding (Sessy)",
         "description": "Wijzig de verbindingsgegevens en lokale dongle-inloggegevens voor de Sessy-batterij {battery_num}.",
@@ -1750,7 +1786,16 @@
         "name": "Voorspellend Laden"
       },
       "predictive_charging_notifications": {
-        "name": "Meldingen Voorspellend Laden"
+        "name": "Meldingen: Plan met Laden"
+      },
+      "notify_plan_info": {
+        "name": "Meldingen: Plan-info"
+      },
+      "notify_execution": {
+        "name": "Meldingen: Uitvoering"
+      },
+      "notify_modes": {
+        "name": "Meldingen: Modi"
       },
       "vacation_mode": {
         "name": "Vakantiemodus"
@@ -1775,9 +1820,6 @@
       },
       "grid_import_window_15min": {
         "name": "15-minutenvenster Netafname"
-      },
-      "capacity_protection_excluded_devices": {
-        "name": "Piekbegrenzing voor Uitgesloten Apparaten"
       },
       "backup_function": {
         "name": "Back-upfunctie"
@@ -2070,6 +2112,9 @@
       },
       "max_discharge_power": {
         "name": "Max. Ontlaadvermogen"
+      },
+      "device_temperature": {
+        "name": "Omvormertemperatuur"
       },
       "internal_temperature": {
         "name": "Interne Temperatuur"
@@ -3079,6 +3124,10 @@
     "use_measured_round_trip_efficiency": {
       "name": "Gemeten retourrendement gebruiken",
       "description": "Verwijdert een vaste waarde van het retourrendement: de planner gebruikt weer het rendement dat op je batterijen is gemeten (0,85 totdat een batterij genoeg historie heeft). De waarde-editor van het dashboard roept dit aan via “Gemeten waarde gebruiken”."
+    },
+    "use_measured_solar_safety_margin": {
+      "name": "Geleerde zonne-veiligheidsmarge gebruiken",
+      "description": "Verwijdert een vaste veiligheidsmarge van de zonneprognose: de planner gebruikt weer de marge die uit de laatste 14 dagen is geleerd (10 % tot er 7 dagen zijn). De waarde-editor van het dashboard roept deze aan via “Gemeten waarde gebruiken”."
     }
   }
 }

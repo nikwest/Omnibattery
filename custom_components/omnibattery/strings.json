@@ -195,6 +195,18 @@
           "port": "HTTP port (default 80)"
         }
       },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Battery {battery_num}: APsystems EZHI",
+        "description": "Enable Local Mode in the AP EasyPower app first, then enter the IP address of the EZHI.",
+        "data": {
+          "name": "Name",
+          "host": "IP address",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "IP address of the EZHI on your network."
+        }
+      },
       "battery_connection_sessy": {
         "title": "Configure battery {battery_num} — Connection (Sessy)",
         "description": "Enter the connection details and the local credentials printed on the Sessy dongle for battery {battery_num}.",
@@ -739,6 +751,18 @@
           "name": "Descriptive name to identify this battery",
           "host": "New IP address of the Zendure SolarFlow on your local network",
           "port": "HTTP port (default 80)"
+        }
+      },
+      "reconfigure_battery_apsystems_ezhi": {
+        "title": "Reconfigure battery {battery_num}: APsystems EZHI",
+        "description": "Enable Local Mode in the AP EasyPower app first, then enter the IP address of the EZHI.",
+        "data": {
+          "name": "Name",
+          "host": "IP address",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "IP address of the EZHI on your network."
         }
       },
       "reconfigure_battery_sessy": {
@@ -1502,6 +1526,18 @@
           "hourly_balance_hysteresis_w": "Minimum change in offset required before a new correction is applied. Prevents micro-adjustments every cycle. 0 = apply every cycle. Default: 15 W."
         }
       },
+      "battery_connection_apsystems_ezhi": {
+        "title": "Battery {battery_num}: APsystems EZHI",
+        "description": "Enable Local Mode in the AP EasyPower app first, then enter the IP address of the EZHI.",
+        "data": {
+          "name": "Name",
+          "host": "IP address",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "IP address of the EZHI on your network."
+        }
+      },
       "battery_connection_sessy": {
         "title": "Configure battery {battery_num} — Connection (Sessy)",
         "description": "Modify the connection details and local dongle credentials for the Sessy battery {battery_num}.",
@@ -1745,7 +1781,16 @@
         "name": "Predictive Charging"
       },
       "predictive_charging_notifications": {
-        "name": "Predictive Charging Notifications"
+        "name": "Notifications: Charge Plan"
+      },
+      "notify_plan_info": {
+        "name": "Notifications: Plan Info"
+      },
+      "notify_execution": {
+        "name": "Notifications: Execution"
+      },
+      "notify_modes": {
+        "name": "Notifications: Modes"
       },
       "vacation_mode": {
         "name": "Vacation Mode"
@@ -1770,9 +1815,6 @@
       },
       "grid_import_window_15min": {
         "name": "Grid Import 15-min Window"
-      },
-      "capacity_protection_excluded_devices": {
-        "name": "Peak Shaving for Excluded Devices"
       },
       "backup_function": {
         "name": "Backup Function"
@@ -2065,6 +2107,9 @@
       },
       "max_discharge_power": {
         "name": "Max Discharge Power"
+      },
+      "device_temperature": {
+        "name": "Inverter Temperature"
       },
       "internal_temperature": {
         "name": "Internal Temperature"
@@ -3068,6 +3113,10 @@
     "use_measured_round_trip_efficiency": {
       "name": "Use measured round-trip efficiency",
       "description": "Drops a fixed Round-Trip Efficiency, so the planner uses the efficiency measured on your batteries again (0.85 until a battery has enough history). The dashboard's value editor calls it from “Use measured”."
+    },
+    "use_measured_solar_safety_margin": {
+      "name": "Use learned solar safety margin",
+      "description": "Drops a fixed Solar Forecast Safety Margin, so the planner uses the margin learned from the last 14 days again (10 % until there are 7 days). The dashboard's value editor calls it from “Use measured”."
     }
   }
 }

@@ -1,9 +1,18 @@
 # Changelog
 
-## [2.0.0b2] - Unreleased
+## [2.0.0b2] - 2026-11-25
+
+### Added
+
+- **APsystems EZHI support** (PR#936): new driver over the EZHI's local HTTP API (enable Local Mode in the AP EasyPower app). Thanks to @funonwheels.
 
 ### Changed
 
+- **Notifications are now switchable by category and follow Home Assistant's language**: **Charge plan** (the existing Predictive Charging Notifications switch, now only for plans with a charge), **Plan info**, **Execution** and **Modes** switches, in a new Notifications card in the panel's Control tab. Alarms, faults and cell alerts cannot be muted. Languages: en, es, ca, de, fr, nl.
+- **The plan notification is easier to read**: charge slots come in a table, slots on other days carry their date and are sorted, holds and sales are listed, and a new line estimates what the plan (charges, holds and sales) saves against using the battery with no plan. Charges and holds show the quarters they really run in (not the whole price hour), and the charge, the holds and the hours the battery is empty (what the house then buys, one row per price) are one table in time order, each row with its icon (legend under the table), a cost column and a total row at the end, which replace the average price and estimated cost lines. Battery, sun, house consumption and the figures that follow from them (grid charge, deficit, what is available) come in one table; sales to the grid, room made for the sun and the price slots of the negative-price and price-info notifications are tables too, with a column per day when the plan reaches tomorrow, and a row for the sun left after the solar safety margin, which is what the plan counts on. The maximum charge and discharge power are a table as well, and the charge one names only the limit that binds (Maximum Grid Import or batteries).
+- **Solar Forecast Safety Margin learns from your forecast's misses**: with no value set it follows how far the day's first forecast fell short of the real sun over the last 14 days (80th percentile, up to 50 %; 10 % until there are 7 days, which it first looks for in the Recorder). Installs that never set a value switch to it. A set value stays; “Use measured” in the panel's value editor goes back to the learned one. The room before negative-price hours keeps the set value or 10 %.
+- **Notification titles now read "Area: state"** (e.g. *Manual Mode: active*, *Predictive Charging: disabled*, *Cell Balance: ...*). IDs do not change, so the blueprints keep working, but automations that match the old English titles must be updated. The Telegram blueprint forwards the text in Home Assistant's language.
+- **Peak Shaving for Excluded Devices switch removed** (#949): Maximum Grid Import always counts excluded devices; with Peak Shaving on, a planned grid charge now counts them too, as with the switch on. Remove it from automations and dashboards. Thanks to @Wimpie-ccc.
 - **Zendure AC models go to full standby after 15 minutes idle** (#633), as the Gielz zenSDK package does to cut the inverter's idle draw; the next charge or discharge wakes it. Thanks to @kastanjepoffer.
 
 ### Fixed
@@ -12,10 +21,13 @@
 - **Guaranteed Minimum SOC is kept on high-consumption days** (#834): a battery below it no longer loses it in the evening plan.
 - **Time Slot holds the energy for after the window from the moment it opens** (#938); **Integration Status** shows *Holding Energy for After the Cheap Slot* instead of *Balanced*.
 - **Daily operation chart: a past quarter with no measurement no longer shows the plan** (#853). Thanks to @Sjoedzj.
+- **Daily operation chart stops at the Peak Shaving SOC threshold** (#941): the projection no longer drains the battery down to the minimum SOC, as the plan and the control already do. Thanks to @Varashi.
 - **Zendure 4000 Mix Pro MPPT inputs count as solar** (#942): system solar power and daily solar energy now include them, and the solar profile starts learning again. If your Solar Production sensor already includes them, take them out of it. Thanks to @xzaz.
 - **Discharge Reserve Status shows the holds still ahead again**: new `upcoming_holds` attribute with the start and end of each planned hold, as the daily chart draws them.
 - **High-Price Sale (*Surplus only*) sells part of the surplus** (#943): when tomorrow's sun cannot refill all of it, it sells the largest part the sun can refill instead of nothing. Thanks to @TvdBrink.
+- **Zendure status LEDs stay on**: the firmware turned them off after a while with **Status LEDs** still on; Omnibattery now re-asserts them every 20 minutes.
 - **Anker: the app's backup reserve is a discharge floor** (#939): Omnibattery stops discharging there instead of excluding the battery as not delivering. New **Backup Power SOC** diagnostic sensor. Thanks to @Rene-63.
+- **No false "not delivering" Repair after a short write glitch** (#945): a battery that is idle or waiting its turn no longer gets the Repair 30 minutes after a brief connection error once its writes go through again. Thanks to @Misterzeh.
 
 ## [2.0.0b1] - 2026-11-23
 

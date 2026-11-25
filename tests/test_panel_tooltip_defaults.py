@@ -40,7 +40,6 @@ from custom_components.omnibattery.const import (
     DEFAULT_TEMP_CHARGE_LIMIT_FLOOR_PCT,
     DEFAULT_NEGATIVE_INJECTION_THRESHOLD,
     DEFAULT_PREDICTIVE_MIN_SOC_FLOOR,
-    DEFAULT_PREDICTIVE_SAFETY_MARGIN_PCT,
     DEFAULT_PREDISCHARGE_RESERVE_SOC,
     DEFAULT_SURPLUS_HOLD_MIN_SAVING,
 )
@@ -76,7 +75,10 @@ DEFAULTS = {
     # predictive charging card
     "predictive_charging": "off",
     "predictive_charging_notifications": "on",
-    "predictive_safety_margin_pct": _pct(DEFAULT_PREDICTIVE_SAFETY_MARGIN_PCT),
+    "notify_plan_info": "same as Charge plan",
+    "notify_execution": "same as Charge plan",
+    "notify_modes": "on",
+    "predictive_safety_margin_pct": "learned (10 % until there are 7 days)",
     "min_soc_floor_enabled": "off",
     "predictive_min_soc_floor": _pct(DEFAULT_PREDICTIVE_MIN_SOC_FLOOR),
     "max_price_threshold_enabled": "off (automatic)",
@@ -137,7 +139,6 @@ DEFAULTS = {
     "hourly_balance_hysteresis_w": _unit(DEFAULT_HOURLY_BALANCE_HYSTERESIS_W, "W"),
     "system_max_charge_power": _unit(DEFAULT_SYSTEM_MAX_CHARGE_POWER, "W", off=True),
     "system_max_discharge_power": _unit(DEFAULT_SYSTEM_MAX_DISCHARGE_POWER, "W", off=True),
-    "capacity_protection_excluded_devices": "off",
     "grid_import_window_15min": "off (on in Belgium)",
     "capacity_protection_soc_threshold": _pct(DEFAULT_CAPACITY_PROTECTION_SOC),
     # temperature charge limit

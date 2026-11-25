@@ -10,6 +10,7 @@ import logging
 from collections.abc import Mapping
 
 from .anker import AnkerModbusDriver
+from .apsystems_ezhi import ApsystemsEzhiDriver
 from .base import BatteryDriver, DriverTraits
 from .esphome import EsphomeEntityDriver
 from .generic_ha import GenericHaEntityDriver
@@ -34,6 +35,7 @@ DRIVERS: dict[str, type[BatteryDriver]] = {
     "huawei": HuaweiSolarDriver,
     "victron": VictronEssDriver,
     "generic_ha": GenericHaEntityDriver,
+    "apsystems_ezhi": ApsystemsEzhiDriver,
 }
 DEFAULT_BRAND = "marstek"
 
